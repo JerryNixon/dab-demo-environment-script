@@ -1,0 +1,80 @@
+**********************
+PowerShell transcript start
+Start time: 20251105121652
+Username: NORTHAMERICA\jnixon
+RunAs User: NORTHAMERICA\jnixon
+Configuration Name: 
+Machine: NXN-ENVY-PC (Microsoft Windows NT 10.0.26200.0)
+Host Application: C:\Program Files\PowerShell\7\pwsh.dll -NoProfile -ExecutionPolicy Bypass -Command Import-Module 'c:\Users\jnixon\.vscode\extensions\ms-vscode.powershell-2025.4.0\modules\PowerShellEditorServices\PowerShellEditorServices.psd1'; Start-EditorServices -HostName 'Visual Studio Code Host' -HostProfileId 'Microsoft.VSCode' -HostVersion '2025.4.0' -BundledModulesPath 'c:\Users\jnixon\.vscode\extensions\ms-vscode.powershell-2025.4.0\modules' -EnableConsoleRepl -StartupBanner "PowerShell Extension v2025.4.0
+Copyright (c) Microsoft Corporation.
+
+https://aka.ms/vscode-powershell
+Type 'help' to get help.
+" -LogLevel 'Warning' -LogPath 'c:\Users\jnixon\AppData\Roaming\Code\logs\20251105T081458\window2\exthost\ms-vscode.powershell' -SessionDetailsPath 'c:\Users\jnixon\AppData\Roaming\Code\User\globalStorage\ms-vscode.powershell\sessions\PSES-VSCode-27404-298829.json' -FeatureFlags @() 
+Process ID: 27400
+PSVersion: 7.4.13
+PSEdition: Core
+GitCommitId: 7.4.13
+OS: Microsoft Windows 10.0.26200
+Platform: Win32NT
+PSCompatibleVersions: 1.0, 2.0, 3.0, 4.0, 5.0, 5.1, 6.0, 7.0
+PSRemotingProtocolVersion: 2.3
+SerializationVersion: 1.1.0.1
+WSManStackVersion: 3.0
+**********************
+dab-deploy-demo version 0.0.1
+
+Checking prerequisites...
+  Azure CLI:
+Installed (2.55.0)
+  sqlcmd:
+Installed
+
+Authenticating to Azure...
+This ensures you're using the correct Azure account and tenant.
+
+Azure authentication successful
+
+Validating required files...
+  database.sql: Found and contains content
+  dab-config.json: Connection string reference validated (@env('MSSQL_CONNECTION_STRING'))
+
+
+Current subscription:
+  Name: DS-SQLDB-SQLAzurePMDemos_ajayj_COGS_42477
+  ID:   fa58cf66-caaf-4ba9-875d-f310d3694845
+
+Validating resource names...
+  All resource names validated
+Creating resource group                                      [=====>                ]
+Starting
+Resource group created                                       [======================]
+dab-demo-20251105121652 (2.5s)
+Getting current Azure AD user                                [=====>                ]
+Starting
+Azure AD user identified                                     [======================]
+jnixon@microsoft.com
+Creating Log Analytics workspace (this may take 1-2 minutes) [=====>                ]
+Starting
+Log Analytics workspace created                              [======================]
+law-environment-20251105121652 (34.2s)
+Creating Container Apps environment (this may take 2-3 mi... [=====>                ]
+Starting
+False
+PS>TerminatingError(): "Failed to create Container Apps environment
+ERROR: Usage error: Supply the --logs-key associated with the --logs-customer-id"
+
+DEPLOYMENT FAILED
+Error: Failed to create Container Apps environment
+ERROR: Usage error: Supply the --logs-key associated with the --logs-customer-id
+Stack: at Assert-Success, C:\Users\jnixon\source\repos\dab-demo-environment-script\script.ps1: line 262
+at <ScriptBlock>, C:\Users\jnixon\source\repos\dab-demo-environment-script\script.ps1: line 816
+at <ScriptBlock>, <No file>: line 1
+
+Partial resources may have been created. Check resource groups:
+az group list --tag author=dab-deploy-demo-script
+To cleanup partial deployment: az group delete -n dab-demo-20251105121652 -y
+**********************
+PowerShell transcript end
+End time: 20251105121913
+**********************

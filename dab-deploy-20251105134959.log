@@ -1,0 +1,131 @@
+**********************
+PowerShell transcript start
+Start time: 20251105134959
+Username: NORTHAMERICA\jnixon
+RunAs User: NORTHAMERICA\jnixon
+Configuration Name: 
+Machine: NXN-ENVY-PC (Microsoft Windows NT 10.0.26200.0)
+Host Application: C:\Program Files\PowerShell\7\pwsh.dll -NoProfile -ExecutionPolicy Bypass -Command Import-Module 'c:\Users\jnixon\.vscode\extensions\ms-vscode.powershell-2025.4.0\modules\PowerShellEditorServices\PowerShellEditorServices.psd1'; Start-EditorServices -HostName 'Visual Studio Code Host' -HostProfileId 'Microsoft.VSCode' -HostVersion '2025.4.0' -BundledModulesPath 'c:\Users\jnixon\.vscode\extensions\ms-vscode.powershell-2025.4.0\modules' -EnableConsoleRepl -StartupBanner "PowerShell Extension v2025.4.0
+Copyright (c) Microsoft Corporation.
+
+https://aka.ms/vscode-powershell
+Type 'help' to get help.
+" -LogLevel 'Warning' -LogPath 'c:\Users\jnixon\AppData\Roaming\Code\logs\20251105T081458\window2\exthost\ms-vscode.powershell' -SessionDetailsPath 'c:\Users\jnixon\AppData\Roaming\Code\User\globalStorage\ms-vscode.powershell\sessions\PSES-VSCode-27404-798251.json' -FeatureFlags @() 
+Process ID: 45480
+PSVersion: 7.4.13
+PSEdition: Core
+GitCommitId: 7.4.13
+OS: Microsoft Windows 10.0.26200
+Platform: Win32NT
+PSCompatibleVersions: 1.0, 2.0, 3.0, 4.0, 5.0, 5.1, 6.0, 7.0
+PSRemotingProtocolVersion: 2.3
+SerializationVersion: 1.1.0.1
+WSManStackVersion: 3.0
+**********************
+dab-deploy-demo version 0.0.1
+
+Checking prerequisites...
+  Azure CLI:
+Installed (2.55.0)
+  sqlcmd:
+Installed
+
+Authenticating to Azure...
+This ensures you're using the correct Azure account and tenant.
+
+Azure authentication successful
+
+Validating required files...
+  database.sql: Found and contains content
+  dab-config.json: Connection string reference validated (@env('MSSQL_CONNECTION_STRING'))
+
+
+Current subscription:
+  Name: DS-SQLDB-SQLAzurePMDemos_ajayj_COGS_42477
+  ID:   fa58cf66-caaf-4ba9-875d-f310d3694845
+
+Validating resource names...
+  All resource names validated
+
+Deployment Progress:
+====================================================================================================
+Creating resource group                                      [                      ] Not Started
+Getting current Azure AD user                                [                      ] Not Started
+Creating Log Analytics workspace                             [                      ] Not Started
+Creating Container Apps environment                          [                      ] Not Started
+Creating SQL Server                                          [                      ] Not Started
+Creating SQL database                                        [                      ] Not Started
+Configuring SQL firewall rules                               [                      ] Not Started
+Testing database connectivity                                [                      ] Not Started
+Deploying database                                           [                      ] Not Started
+Creating storage account                                     [                      ] Not Started
+Creating file share                                          [                      ] Not Started
+Creating Container App with managed identity                 [                      ] Not Started
+Granting database access to managed identity                 [                      ] Not Started
+Restarting container                                         [                      ] Not Started
+Verifying container running                                  [                      ] Not Started
+Fetching Container App URL                                   [                      ] Not Started
+====================================================================================================
+
+
+Creating resource group
+ [=====>                ]
+Starting
+
+Creating resource group
+ [======================]
+dab-demo-20251105134959 (3.5s)
+
+Getting current Azure AD user
+ [=====>                ]
+Starting
+
+Getting current Azure AD user
+ [======================]
+jnixon@microsoft.com
+
+Creating Log Analytics workspace
+ [=====>                ]
+Starting
+
+Creating Log Analytics workspace
+ [======================]
+law-environment-20251105134959 (39.2s)
+
+Creating Container Apps environment
+ [=====>                ]
+Starting
+
+Creating Container Apps environment
+ [======================]
+aca-environment-20251105134959 (139s)
+
+Creating SQL Server
+ [=====>                ]
+Starting
+
+Creating SQL Server
+ [========X=============]
+Error: Network connectivity issue. Check your internet connection and retry.
+PS>TerminatingError(): "Failed to create SQL server
+ERROR: unrecognized arguments: --tags author=dab-deploy-demo-script version=0.0.1 owner=jnixon
+
+Examples from AI knowledge base:
+az sql server create --location westus --resource-group mygroup --name myserver --admin-user myadminuser --admin-password myadminpassword
+Create a server.
+
+az sql server create --location westus --resource-group mygroup --name myserver --admin-user myadminuser --admin-password myadminpassword --enable-public-network false
+Create a server with disabled public network access to server.
+
+https://docs.microsoft.com/en-US/cli/azure/sql/server#az_sql_server_create
+Read more about the command in reference docs"
+
+=====================================================================================
+DEPLOYMENT FAILED
+=====================================================================================
+
+Error: Network connectivity issue. Check your internet connection and retry.
+**********************
+PowerShell transcript end
+End time: 20251105135419
+**********************
