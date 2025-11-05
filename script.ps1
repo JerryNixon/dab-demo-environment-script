@@ -1103,6 +1103,7 @@ try {
     [void](Test-AzureTokenExpiry -ExpiryBufferMinutes 5)
     
     $sqlStartTime = Get-Date
+    # Note: --tags not supported in create, apply via update afterward
     $sqlServerArgs = @(
         'sql', 'server', 'create',
         '--name', $sqlServer,
@@ -1111,12 +1112,17 @@ try {
         '--enable-ad-only-auth',
         '--external-admin-principal-type', 'User',
         '--external-admin-name', $currentUserName,
-        '--external-admin-sid', $currentUser,
-        '--tags'
-    ) + $commonTagValues
+        '--external-admin-sid', $currentUser
+    )
     $sqlServerResult = Invoke-AzCli -Arguments $sqlServerArgs
     Stop-Heartbeat
     Assert-Success -ExitCode $sqlServerResult.ExitCode -Message "Failed to create SQL server" -CommandOutput $sqlServerResult.Text
+    
+    # Apply tags separately (az sql server create doesn't support --tags in some CLI versions)
+    $sqlTagArgs = @('sql', 'server', 'update', '--name', $sqlServer, '--resource-group', $rg, '--tags') + $commonTagValues
+    $sqlTagResult = Invoke-AzCli -Arguments $sqlTagArgs
+    Assert-Success -ExitCode $sqlTagResult.ExitCode -Message "Failed to apply tags to SQL server" -CommandOutput $sqlTagResult.Text
+    
     $sqlElapsed = [math]::Round(((Get-Date) - $sqlStartTime).TotalSeconds, 1)
     Update-ProgressUI -Step "Creating SQL Server" -Status "Success" -Extra $sqlServer -ElapsedTime $sqlElapsed
     
