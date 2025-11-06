@@ -2,11 +2,14 @@
 # 
 # Parameters:
 #   -Region: Azure region for deployment (default: westus2)
-#   -ContainerImage: DAB container image to deploy (default: mcr.microsoft.com/azure-databases/data-api-builder:1.7.75-rc)
 #   -DatabasePath: Path to SQL database file - local or relative from script root (default: ./database.sql)
-#   -ConfigPath: Path to DAB config file - local or relative from script root (default: ./dab-config.json)
+#   -ConfigPath: Path to DAB config file - used to build custom image (default: ./dab-config.json)
 #   -NoBrowser: Skip opening Azure Portal after deployment (useful for CI/CD)
 #   -Diagnostics: Enable verbose Azure CLI output (sets AZURE_CORE_ONLY_SHOW_ERRORS=0, AZURE_CLI_DIAGNOSTICS=1)
+#
+# Notes:
+#   The script builds a custom Docker image with dab-config.json baked in using Azure Container Registry.
+#   The Dockerfile must be present in the current directory.
 #
 # Examples:
 #   .\script.ps1
@@ -17,7 +20,6 @@
 #
 param(
     [string]$Region = "westus2",
-    [string]$ContainerImage = "mcr.microsoft.com/azure-databases/data-api-builder:1.7.75-rc",
     [string]$DatabasePath = "./database.sql",
     [string]$ConfigPath = "./dab-config.json",
     [switch]$NoBrowser,
@@ -62,7 +64,6 @@ $Config = @{
     LogRetentionDays = 90
     ContainerCpu = "0.5"
     ContainerMemory = "1.0Gi"
-    StorageShareQuotaGb = 1
 }
 
 $ErrorActionPreference = 'Stop'
@@ -145,6 +146,100 @@ if (-not (Get-Command sqlcmd -ErrorAction SilentlyContinue)) {
     Write-Host "  sqlcmd: " -NoNewline -ForegroundColor Yellow
     Write-Host "Installed" -ForegroundColor Green
 }
+
+# Validate required files
+# Check database.sql exists
+if (-not (Test-Path $DatabasePath)) {
+    Write-Host "  database.sql: " -NoNewline -ForegroundColor Yellow
+    Write-Host "Not found" -ForegroundColor Red
+    Write-Host ""
+    Write-Host "ERROR: database.sql not found at: $DatabasePath" -ForegroundColor Red
+    Write-Host "Please create a database.sql file with your database schema and try again." -ForegroundColor Yellow
+    Write-Host "Or specify a custom path: -DatabasePath <path>" -ForegroundColor Cyan
+    throw "database.sql not found at: $DatabasePath"
+}
+
+# Check database.sql is not empty
+$databaseContent = Get-Content $DatabasePath -Raw -ErrorAction SilentlyContinue
+if ([string]::IsNullOrWhiteSpace($databaseContent)) {
+    Write-Host "  database.sql: " -NoNewline -ForegroundColor Yellow
+    Write-Host "Empty file" -ForegroundColor Red
+    Write-Host ""
+    Write-Host "ERROR: database.sql is empty at: $DatabasePath" -ForegroundColor Red
+    Write-Host "The database script file is empty. Please add SQL commands to create your database." -ForegroundColor Yellow
+    throw "database.sql is empty"
+}
+Write-Host "  database.sql: " -NoNewline -ForegroundColor Yellow
+Write-Host "Found and contains content" -ForegroundColor Green
+
+# Check dab-config.json exists
+if (-not (Test-Path $ConfigPath)) {
+    Write-Host "  dab-config.json: " -NoNewline -ForegroundColor Yellow
+    Write-Host "Not found" -ForegroundColor Red
+    Write-Host ""
+    Write-Host "ERROR: dab-config.json not found at: $ConfigPath" -ForegroundColor Red
+    Write-Host "Please create a dab-config.json file with your DAB configuration." -ForegroundColor Yellow
+    Write-Host "Or specify a custom path: -ConfigPath <path>" -ForegroundColor Cyan
+    throw "dab-config.json not found at: $ConfigPath"
+}
+
+# Validate dab-config.json structure
+try {
+    $dabConfig = Get-Content $ConfigPath -Raw | ConvertFrom-Json
+    
+    # Check for connection string reference
+    $expectedEnvVar = "MSSQL_CONNECTION_STRING"
+    $expectedRef = "@env('$expectedEnvVar')"
+    $connectionStringRef = $dabConfig.'data-source'.'connection-string'
+    
+    if ($connectionStringRef -ne $expectedRef) {
+        Write-Host "  dab-config.json: " -NoNewline -ForegroundColor Yellow
+        Write-Host "Invalid connection string" -ForegroundColor Red
+        Write-Host ""
+        Write-Host "ERROR: dab-config.json has incorrect connection string reference." -ForegroundColor Red
+        Write-Host "  Expected: `"connection-string`": `"$expectedRef`"" -ForegroundColor Yellow
+        Write-Host "  Found:    `"connection-string`": `"$connectionStringRef`"" -ForegroundColor Red
+        Write-Host ""
+        Write-Host "The script sets the environment variable '$expectedEnvVar' in the container." -ForegroundColor White
+        Write-Host "Please update your dab-config.json to reference this variable:" -ForegroundColor White
+        Write-Host ""
+        Write-Host '  "data-source": {' -ForegroundColor Cyan
+        Write-Host '    "database-type": "mssql",' -ForegroundColor Cyan
+        Write-Host "    `"connection-string`": `"$expectedRef`"" -ForegroundColor Green
+        Write-Host '  }' -ForegroundColor Cyan
+        throw "dab-config.json has incorrect connection string reference. Expected: $expectedRef, Found: $connectionStringRef"
+    }
+    Write-Host "  dab-config.json: " -NoNewline -ForegroundColor Yellow
+    Write-Host "Connection string reference validated ($expectedRef)" -ForegroundColor Green
+} catch {
+    Write-Host "  dab-config.json: " -NoNewline -ForegroundColor Yellow
+    Write-Host "Parse error" -ForegroundColor Red
+    Write-Host ""
+    Write-Host "ERROR: Failed to parse dab-config.json at: $ConfigPath" -ForegroundColor Red
+    Write-Host "  $($_.Exception.Message)" -ForegroundColor Yellow
+    Write-Host "Please ensure the file contains valid JSON syntax." -ForegroundColor White
+    throw "Failed to parse or validate dab-config.json: $($_.Exception.Message)"
+}
+
+# Validate Dockerfile exists (required for baked-in config approach)
+$dockerfilePath = "./Dockerfile"
+if (-not (Test-Path $dockerfilePath)) {
+    Write-Host "  Dockerfile: " -NoNewline -ForegroundColor Yellow
+    Write-Host "Not found" -ForegroundColor Red
+    Write-Host ""
+    Write-Host "ERROR: Dockerfile not found at: $dockerfilePath" -ForegroundColor Red
+    Write-Host "The script builds a custom image with dab-config.json baked in." -ForegroundColor Yellow
+    Write-Host "Please ensure Dockerfile exists in the current directory." -ForegroundColor White
+    throw "Dockerfile not found at: $dockerfilePath"
+}
+Write-Host "  Dockerfile: " -NoNewline -ForegroundColor Yellow
+Write-Host "Found" -ForegroundColor Green
+
+# Calculate config file hash for reproducible image tagging
+$configHash = (Get-FileHash $ConfigPath -Algorithm SHA256).Hash.Substring(0,8).ToLower()
+Write-Host "  Config hash: " -NoNewline -ForegroundColor Yellow
+Write-Host $configHash -ForegroundColor Green
+
 Write-Host ""
 
 # CRITICAL: Always run az login to ensure correct user context
@@ -158,76 +253,13 @@ try {
     if ($LASTEXITCODE -ne 0) {
         throw "Azure login failed"
     }
-    Write-Host "Azure authentication successful" -ForegroundColor Green
+    Write-Host "Azure authentication completed successfully" -ForegroundColor Green
     Write-Host ""
 } catch {
     Write-Host "Azure authentication failed" -ForegroundColor Red
     Write-Host "Please ensure you have access to an Azure subscription and try again." -ForegroundColor Yellow
     throw "Azure authentication failed: $($_.Exception.Message)"
 }
-
-# Validate required files before starting
-Write-Host "Validating required files..." -ForegroundColor Cyan
-
-# Check database.sql exists
-if (-not (Test-Path $DatabasePath)) {
-    Write-Host "ERROR: database.sql not found at: $DatabasePath" -ForegroundColor Red
-    Write-Host "Please create a database.sql file with your database schema and try again." -ForegroundColor Yellow
-    Write-Host "Or specify a custom path: -DatabasePath <path>" -ForegroundColor Cyan
-    throw "database.sql not found at: $DatabasePath"
-}
-
-# Check database.sql is not empty
-$databaseContent = Get-Content $DatabasePath -Raw -ErrorAction SilentlyContinue
-if ([string]::IsNullOrWhiteSpace($databaseContent)) {
-    Write-Host "ERROR: database.sql is empty at: $DatabasePath" -ForegroundColor Red
-    Write-Host "The database script file is empty. Please add SQL commands to create your database." -ForegroundColor Yellow
-    Write-Host "Example content:" -ForegroundColor Cyan
-    Write-Host "  CREATE TABLE dbo.MyTable (Id INT PRIMARY KEY, Name NVARCHAR(100));" -ForegroundColor White
-    throw "database.sql is empty at: $DatabasePath"
-}
-Write-Host "  database.sql: Found and contains content" -ForegroundColor Green
-
-# Check dab-config.json exists
-if (-not (Test-Path $ConfigPath)) {
-    Write-Host "ERROR: dab-config.json not found at: $ConfigPath" -ForegroundColor Red
-    Write-Host "Please create a dab-config.json file with your Data API Builder configuration and try again." -ForegroundColor Yellow
-    Write-Host "Or specify a custom path: -ConfigPath <path>" -ForegroundColor Cyan
-    throw "dab-config.json not found at: $ConfigPath"
-}
-
-# Validate dab-config.json has correct connection string environment variable reference
-try {
-    $configContent = Get-Content $ConfigPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
-    $connectionStringRef = $configContent.'data-source'.'connection-string'
-    
-    # The script sets MSSQL_CONNECTION_STRING, so config must reference it
-    $expectedEnvVar = "MSSQL_CONNECTION_STRING"
-    $expectedRef = "@env('$expectedEnvVar')"
-    
-    if ($connectionStringRef -ne $expectedRef) {
-        Write-Host "ERROR: dab-config.json has incorrect connection string reference" -ForegroundColor Red
-        Write-Host "  Expected: `"connection-string`": `"$expectedRef`"" -ForegroundColor Yellow
-        Write-Host "  Found:    `"connection-string`": `"$connectionStringRef`"" -ForegroundColor Red
-        Write-Host ""
-        Write-Host "The script sets the environment variable '$expectedEnvVar' in the container." -ForegroundColor White
-        Write-Host "Please update your dab-config.json to reference this variable:" -ForegroundColor White
-        Write-Host ""
-        Write-Host '  "data-source": {' -ForegroundColor Cyan
-        Write-Host '    "database-type": "mssql",' -ForegroundColor Cyan
-        Write-Host "    `"connection-string`": `"$expectedRef`"" -ForegroundColor Green
-        Write-Host '  }' -ForegroundColor Cyan
-        throw "dab-config.json has incorrect connection string reference. Expected: $expectedRef, Found: $connectionStringRef"
-    }
-    Write-Host "  dab-config.json: Connection string reference validated ($expectedRef)" -ForegroundColor Green
-} catch {
-    Write-Host "ERROR: Failed to parse dab-config.json at: $ConfigPath" -ForegroundColor Red
-    Write-Host "  $($_.Exception.Message)" -ForegroundColor Yellow
-    Write-Host "Please ensure the file contains valid JSON syntax." -ForegroundColor White
-    throw "Failed to parse or validate dab-config.json: $($_.Exception.Message)"
-}
-
-Write-Host ""
 
 # Detect VS Code terminal (limited ANSI support)
 function Test-IsVsCodeHost {
@@ -272,8 +304,9 @@ function Start-Heartbeat {
 
 function Stop-Heartbeat {
     if ($global:__heartbeatJob) {
-        Stop-Job $global:__heartbeatJob -Force | Out-Null
-        Remove-Job $global:__heartbeatJob -Force | Out-Null
+        # VS Code PowerShell host doesn't support -Force parameter
+        try { Stop-Job $global:__heartbeatJob -ErrorAction SilentlyContinue } catch {}
+        try { Remove-Job $global:__heartbeatJob -ErrorAction SilentlyContinue } catch {}
         Write-Host "`r" -NoNewline
         $global:__heartbeatJob = $null
     }
@@ -362,6 +395,9 @@ function Update-ProgressUI {
     
     .PARAMETER ElapsedTime
     Optional elapsed time in seconds
+    
+    .PARAMETER EstimatedTime
+    Optional estimated time in seconds (shown for Starting status)
     #>
     param(
         [Parameter(Mandatory)]
@@ -372,13 +408,21 @@ function Update-ProgressUI {
         
         [string]$Extra = "",
         
-        [double]$ElapsedTime = 0
+        [double]$ElapsedTime = 0,
+        
+        [double]$EstimatedTime = 0
     )
 
     # VS Code fallback: simple text output
     if (-not $script:UseLiveProgress) {
         $statusText = switch ($Status) {
-            "Starting" { "Starting..." }
+            "Starting" { 
+                if ($EstimatedTime -gt 0) { 
+                    $targetTime = (Get-Date).AddSeconds($EstimatedTime).ToString("HH:mm:ss")
+                    "Starting (Estimated $($EstimatedTime)s in $targetTime)..." 
+                }
+                else { "Starting..." }
+            }
             "Progress" { "In Progress..." }
             "Success"  { 
                 if ($ElapsedTime -gt 0) { "✓ $Extra ($($ElapsedTime)s)" }
@@ -436,7 +480,13 @@ function Update-ProgressUI {
     
     # Build status text
     $statusText = switch ($Status) {
-        "Starting" { "Starting" }
+        "Starting" { 
+            if ($EstimatedTime -gt 0) { 
+                # For live table: just show "~Xs" to keep it compact
+                "~$($EstimatedTime)s" 
+            }
+            else { "Starting" }
+        }
         "Progress" { "In Progress" }
         "Success"  { 
             if ($ElapsedTime -gt 0) { "$Extra ($($ElapsedTime)s)" }
@@ -726,6 +776,18 @@ function Start-CountdownSleep($Seconds, $Reason, $ResourceName = "") {
     }
     
     $totalSeconds = $Seconds
+    
+    # Check if running in VS Code (simplified mode)
+    if ($script:isVsCodeHost) {
+        # VS Code simplified output: single line without progress bar
+        Write-Host "$Reason... " -NoNewline -ForegroundColor DarkCyan
+        Start-Sleep -Seconds $Seconds
+        $elapsedText = if ($ResourceName) { "$ResourceName ($totalSeconds`s)" } else { "($totalSeconds`s)" }
+        Write-Host $elapsedText -ForegroundColor Green
+        return
+    }
+    
+    # Full terminal: animated progress bar with countdown
     $progressBar = "[======================]"
     
     # Show starting state
@@ -753,8 +815,8 @@ function Start-CountdownSleep($Seconds, $Reason, $ResourceName = "") {
 
 function Write-DeploymentSummary {
     param(
-        $ResourceGroup, $Region, $SqlServer, $SqlDatabase, $Container, $ContainerUrl, $ConfigPath,
-        $LogAnalytics, $Environment, $CurrentUser, $DatabaseType, $TotalTime, $ClientIp, $StorageAccount, $FileShare, $SqlServerFqdn, $FirewallRuleName
+        $ResourceGroup, $Region, $SqlServer, $SqlDatabase, $Container, $ContainerUrl,
+        $LogAnalytics, $Environment, $CurrentUser, $DatabaseType, $TotalTime, $ClientIp, $SqlServerFqdn, $FirewallRuleName
     )
     
     $subscriptionIdResult = Invoke-AzCli -Arguments @('account', 'show', '--query', 'id', '--output', 'tsv')
@@ -780,13 +842,7 @@ function Write-DeploymentSummary {
     Write-Host "    Environment:     $Environment"
     Write-Host "    Identity:        System-assigned managed identity"
     Write-Host "    Purpose:         Runs Data API Builder with SQL connectivity"
-    if ($ConfigPath) {
-        Write-Host "    Config Path:     $ConfigPath"
-    }
-    Write-Host ""
-    Write-Host "  Storage Account:   $StorageAccount"
-    Write-Host "    File Share:      $FileShare"
-    Write-Host "    Purpose:         Hosts dab-config.json (mounted at /mnt/dab-config)"
+    Write-Host "    Config:          Baked into container image at /App/dab-config.json"
     Write-Host ""
     Write-Host "  Log Analytics:     $LogAnalytics"
     Write-Host "    Purpose:         Container Apps environment logging"
@@ -849,13 +905,11 @@ function Assert-ResourceNameLength {
         [Parameter(Mandatory)]
         [ValidateSet(
             'ResourceGroup',        # 1-90 chars, alphanumerics, underscores, parentheses, hyphens, periods (except end)
-            'StorageAccount',       # 3-24 chars, lowercase alphanumerics only
             'SqlServer',            # 1-63 chars, lowercase alphanumerics and hyphens (not start/end with hyphen)
             'Database',             # 1-128 chars, cannot use: <>*%&:\/? or control characters
             'ContainerApp',         # 1-32 chars, lowercase alphanumerics and hyphens
             'ContainerEnvironment', # 1-60 chars, alphanumerics and hyphens
-            'LogAnalytics',         # 4-63 chars, alphanumerics and hyphens
-            'FileShare'            # 3-63 chars, lowercase alphanumerics and hyphens
+            'LogAnalytics'          # 4-63 chars, alphanumerics and hyphens
         )]
         [string]$ResourceType,
         
@@ -865,22 +919,18 @@ function Assert-ResourceNameLength {
     # Define limits per resource type (based on Azure documentation)
     $limits = @{
         'ResourceGroup'        = 90
-        'StorageAccount'       = 24
         'SqlServer'            = 63
         'Database'             = 128
         'ContainerApp'         = 32
         'ContainerEnvironment' = 60
         'LogAnalytics'         = 63
-        'FileShare'            = 63
     }
     
     $maxLen = if ($MaxLength -gt 0) { $MaxLength } else { $limits[$ResourceType] }
     
     if ($Name.Length -gt $maxLen) {
         $trimmedName = $Name.Substring(0, $maxLen)
-        Write-Host "  Warning: $ResourceType name trimmed from $($Name.Length) to $maxLen chars" -ForegroundColor Yellow
-        Write-Host "    Original: $Name" -ForegroundColor DarkGray
-        Write-Host "    Trimmed:  $trimmedName" -ForegroundColor DarkGray
+        # Silently trim - no warning output
         return $trimmedName
     }
     
@@ -963,34 +1013,30 @@ try {
     $container = "data-api-container"
     $sqlServer = "sql-server-$runTimestamp"
     $sqlDb = "sql-database"
-    $logAnalytics = "law-environment-$runTimestamp"
-    $configMountPath = "/mnt/dab-config"
-    $storageShareName = "config-$runTimestamp"
+    $logAnalytics = "log-workspace-$runTimestamp"
     
     # Validate and trim all resource names to Azure limits
-    Write-Host "`nValidating resource names..." -ForegroundColor Cyan
     $rg = Assert-ResourceNameLength -Name $rg -ResourceType 'ResourceGroup'
     $acaEnv = Assert-ResourceNameLength -Name $acaEnv -ResourceType 'ContainerEnvironment'
     $container = Assert-ResourceNameLength -Name $container -ResourceType 'ContainerApp'
     $sqlServer = Assert-ResourceNameLength -Name $sqlServer -ResourceType 'SqlServer'
     $sqlDb = Assert-ResourceNameLength -Name $sqlDb -ResourceType 'Database'
     $logAnalytics = Assert-ResourceNameLength -Name $logAnalytics -ResourceType 'LogAnalytics'
-    $storageShareName = Assert-ResourceNameLength -Name $storageShareName -ResourceType 'FileShare'
-    Write-Host "  All resource names validated" -ForegroundColor Green
 
     # Initialize Docker-style live progress UI
     $deploymentSteps = @(
         "Creating resource group",
         "Getting current Azure AD user",
-        "Creating Log Analytics workspace",
-        "Creating Container Apps environment",
         "Creating SQL Server",
         "Creating SQL database",
         "Configuring SQL firewall rules",
         "Testing database connectivity",
         "Deploying database",
-        "Creating storage account",
-        "Creating file share",
+        "Creating Log Analytics workspace",
+        "Creating Container Apps environment",
+        "Validating DAB configuration",
+        "Creating Azure Container Registry",
+        "Building custom DAB image with baked config",
         "Creating Container App with managed identity",
         "Granting database access to managed identity",
         "Restarting container",
@@ -1000,7 +1046,7 @@ try {
     Initialize-ProgressUI -Steps $deploymentSteps
 
     Set-CurrentOperation "resource-group" "Creating resource group"
-    Update-ProgressUI -Step "Creating resource group" -Status "Starting"
+    Update-ProgressUI -Step "Creating resource group" -Status "Starting" -EstimatedTime 3
     $rgStartTime = Get-Date
     $rgArgs = @('group', 'create', '--name', $rg, '--location', $Region, '--tags') + $commonTagValues
     $rgCreateResult = Invoke-AzCli -Arguments $rgArgs
@@ -1039,7 +1085,7 @@ try {
 
     # Log Analytics
     Set-CurrentOperation "log-analytics" "Creating Log Analytics workspace"
-    Write-Progress-Step "Creating Log Analytics workspace" "Starting"
+    Update-ProgressUI -Step "Creating Log Analytics workspace" -Status "Starting" -EstimatedTime 42
     $lawStartTime = Get-Date
     Start-Heartbeat -Message "Creating Log Analytics workspace"
     $lawCreateArgs = @('monitor', 'log-analytics', 'workspace', 'create', '--resource-group', $rg, '--workspace-name', $logAnalytics, '--location', $Region, '--tags') + $commonTagValues
@@ -1079,7 +1125,7 @@ try {
 
     # ACA environment
     Set-CurrentOperation "container-apps-env" "Creating Container Apps environment"
-    Update-ProgressUI -Step "Creating Container Apps environment" -Status "Starting"
+    Update-ProgressUI -Step "Creating Container Apps environment" -Status "Starting" -EstimatedTime 136
     
     # Check token before long operation (silence return value)
     [void](Test-AzureTokenExpiry -ExpiryBufferMinutes 5)
@@ -1094,9 +1140,51 @@ try {
     Update-ProgressUI -Step "Creating Container Apps environment" -Status "Success" -Extra $acaEnv -ElapsedTime $acaElapsed
     Clear-CurrentOperation
 
+    # Azure Container Registry - Create and build custom image with baked config
+    Set-CurrentOperation "acr" "Creating Azure Container Registry"
+    Update-ProgressUI -Step "Creating Azure Container Registry" -Status "Starting" -EstimatedTime 30
+    
+    # Generate unique ACR name (5-50 chars, alphanumeric only)
+    $acrName = "acr$($runTimestamp.Substring(8))".ToLower()  # Use last 6 chars of timestamp for uniqueness
+    
+    [void](Test-AzureTokenExpiry -ExpiryBufferMinutes 5)
+    $acrStartTime = Get-Date
+    $acrArgs = @('acr', 'create', '--resource-group', $rg, '--name', $acrName, '--sku', 'Basic', '--admin-enabled', 'true', '--tags') + $commonTagValues
+    $acrResult = Invoke-AzCli -Arguments $acrArgs
+    Assert-Success -ExitCode $acrResult.ExitCode -Message "Failed to create Azure Container Registry" -CommandOutput $acrResult.Text
+    $acrElapsed = [math]::Round(((Get-Date) - $acrStartTime).TotalSeconds, 1)
+    Update-ProgressUI -Step "Creating Azure Container Registry" -Status "Success" -Extra $acrName -ElapsedTime $acrElapsed
+    
+    # Get ACR login server
+    Write-Progress-Step "  Retrieving ACR login server" "Info"
+    $acrLoginServerArgs = @('acr', 'show', '--resource-group', $rg, '--name', $acrName, '--query', 'loginServer', '--output', 'tsv')
+    $acrLoginServerResult = Invoke-AzCli -Arguments $acrLoginServerArgs
+    Assert-Success -ExitCode $acrLoginServerResult.ExitCode -Message "Failed to retrieve ACR login server" -CommandOutput $acrLoginServerResult.Text
+    $acrLoginServer = $acrLoginServerResult.TrimmedText
+    
+    # Build custom image using ACR Build (no local Docker daemon required)
+    Set-CurrentOperation "image-build" "Building custom DAB image"
+    Update-ProgressUI -Step "Building custom DAB image with baked config" -Status "Starting" -EstimatedTime 90
+    
+    $imageTag = "$acrLoginServer/dab-baked:$configHash"
+    Write-Progress-Step "  Building image: $imageTag" "Info"
+    
+    Start-Heartbeat -Message "Building Docker image with ACR (this may take 1-2 minutes)"
+    $buildStartTime = Get-Date
+    $buildArgs = @('acr', 'build', '--resource-group', $rg, '--registry', $acrName, '--image', $imageTag, '--file', 'Dockerfile', '.')
+    $buildResult = Invoke-AzCli -Arguments $buildArgs
+    Stop-Heartbeat
+    Assert-Success -ExitCode $buildResult.ExitCode -Message "Failed to build custom DAB image" -CommandOutput $buildResult.Text
+    $buildElapsed = [math]::Round(((Get-Date) - $buildStartTime).TotalSeconds, 1)
+    Update-ProgressUI -Step "Building custom DAB image with baked config" -Status "Success" -Extra $imageTag -ElapsedTime $buildElapsed
+    
+    # Use the custom-built image for container deployment
+    $ContainerImage = $imageTag
+    Clear-CurrentOperation
+
     # SQL Server (AAD-only) - Set admin at creation time for reliability
     Set-CurrentOperation "sql-server" "Creating SQL Server"
-    Update-ProgressUI -Step "Creating SQL Server" -Status "Starting"
+    Update-ProgressUI -Step "Creating SQL Server" -Status "Starting" -EstimatedTime 80
     
     Start-Heartbeat -Message "Creating SQL Server with Entra ID authentication"
     # Check token before SQL operations (can be slow in some regions)
@@ -1118,8 +1206,14 @@ try {
     Stop-Heartbeat
     Assert-Success -ExitCode $sqlServerResult.ExitCode -Message "Failed to create SQL server" -CommandOutput $sqlServerResult.Text
     
-    # Apply tags separately (az sql server create doesn't support --tags in some CLI versions)
-    $sqlTagArgs = @('sql', 'server', 'update', '--name', $sqlServer, '--resource-group', $rg, '--tags') + $commonTagValues
+    # Apply tags separately using --set (az sql server update doesn't support --tags in CLI 2.55.0+)
+    # Build tag arguments: --set tags.key1=value1 tags.key2=value2 tags.key3=value3
+    $sqlTagArgs = @('sql', 'server', 'update', '--name', $sqlServer, '--resource-group', $rg, '--set')
+    foreach ($tag in $commonTagValues) {
+        if ($tag -match '^([^=]+)=(.+)$') {
+            $sqlTagArgs += "tags.$($Matches[1])=$($Matches[2])"
+        }
+    }
     $sqlTagResult = Invoke-AzCli -Arguments $sqlTagArgs
     Assert-Success -ExitCode $sqlTagResult.ExitCode -Message "Failed to apply tags to SQL server" -CommandOutput $sqlTagResult.Text
     
@@ -1137,27 +1231,53 @@ try {
     # Add firewall rule for current machine with retry logic
     Write-Progress-Step "Adding firewall rule for local machine access" "Starting"
     $clientIp = $null
-    $ipServices = @("https://api.ipify.org", "https://ifconfig.me", "https://icanhazip.com")
+    $ipServices = @(
+        "https://api.ipify.org?format=text",
+        "https://ifconfig.me",
+        "https://icanhazip.com"
+    )
     
     foreach ($service in $ipServices) {
         try {
-            $clientIp = Invoke-RestMethod -Uri $service -TimeoutSec 5 -ErrorAction Stop
-            $clientIp = $clientIp?.Trim()
-            if ($clientIp -and $clientIp -match '^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$') {
-                break
-            }
-        } catch {
-            Write-Progress-Step "IP detection service $service failed, trying next..." "Warning"
-            continue
-        }
+            $clientIp = (Invoke-RestMethod -Uri $service -UseBasicParsing -TimeoutSec 5 -ErrorAction Stop).Trim()
+            if ($clientIp -match '^\d{1,3}(\.\d{1,3}){3}$') { break }
+            $clientIp = $null
+        } catch { continue }
     }
     
-    if (-not $clientIp) { throw "Unable to detect public IP address from any service. Check network connectivity." }
+    # Fallback using Azure CLI REST (corpnet-friendly)
+    if (-not $clientIp) {
+        try {
+            $ipInfo = Invoke-AzCli -Arguments @('rest','--method','get','--url','https://ipinfo.io/json','--query','ip','--output','tsv')
+            if ($ipInfo.ExitCode -eq 0 -and $ipInfo.TrimmedText -match '^\d{1,3}(\.\d{1,3}){3}$') {
+                $clientIp = $ipInfo.TrimmedText
+            }
+        } catch {}
+    }
+    
+    # Default when all methods fail
+    if (-not $clientIp) {
+        Write-Host "`nPublic IP detection failed. Using safe default 0.0.0.0–255.255.255.255." -ForegroundColor Yellow
+        $startIp = "0.0.0.0"
+        $endIp = "255.255.255.255"
+    } else {
+        $startIp = $clientIp
+        $endIp = $clientIp
+    }
+    
     $firewallRuleName = "AllowLocalMachine-$runTimestamp"
-    $firewallArgs = @('sql', 'server', 'firewall-rule', 'create', '--resource-group', $rg, '--server', $sqlServer, '--name', $firewallRuleName, '--start-ip-address', $clientIp, '--end-ip-address', $clientIp)
+    $firewallArgs = @(
+        'sql', 'server', 'firewall-rule', 'create',
+        '--resource-group', $rg,
+        '--server', $sqlServer,
+        '--name', $firewallRuleName,
+        '--start-ip-address', $startIp,
+        '--end-ip-address', $endIp
+    )
+    
     $firewallResult = Invoke-AzCli -Arguments $firewallArgs
     Assert-Success -ExitCode $firewallResult.ExitCode -Message "Failed to create firewall rule" -CommandOutput $firewallResult.Text
-    Write-Progress-Step "Firewall rule created for IP: $clientIp" "Success"
+    Write-Progress-Step "Firewall rule created for IP range: $startIp - $endIp" "Success"
     
     # Quick connectivity sanity check (TCP 1433 reachability)
     Write-Progress-Step "Testing SQL Server connectivity on port 1433" "Starting"
@@ -1174,29 +1294,44 @@ try {
     }
 
     # Wait for SQL Server to be fully ready (Entra integration needs time)
-    Start-CountdownSleep $Config.PropagationWaitSec "Waiting for SQL Server Entra ID integration" "Propagation delay"
-    
-    # Poll AAD-only auth state to confirm propagation (defensive against multi-region delays)
-    Write-Progress-Step "Verifying Entra ID authentication is active" "Starting"
+    # Try up to 2 times with 30-second waits
+    $maxAttempts = 2
     $adOnlyReady = $false
-    $adOnlyWaitStart = Get-Date
-    $maxAdOnlyWaitSeconds = 60
     
-    while (-not $adOnlyReady -and ((Get-Date) - $adOnlyWaitStart).TotalSeconds -lt $maxAdOnlyWaitSeconds) {
-        $adOnlyStateArgs = @('sql', 'server', 'ad-only-auth', 'get', '--resource-group', $rg, '--server-name', $sqlServer, '--query', 'azureAdOnlyAuthentication', '--output', 'tsv')
-        $adOnlyStateResult = Invoke-AzCli -Arguments $adOnlyStateArgs
+    for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
+        if ($attempt -gt 1) {
+            Write-Host "`nRetrying Entra ID verification (Attempt $attempt of $maxAttempts)" -ForegroundColor Yellow
+        }
         
-        if ($adOnlyStateResult.ExitCode -eq 0 -and $adOnlyStateResult.TrimmedText -eq 'true') {
-            $adOnlyReady = $true
-        } else {
-            Start-Sleep -Seconds 5
+        Start-CountdownSleep $Config.PropagationWaitSec "Waiting for SQL Server Entra ID integration" "Propagation delay"
+        
+        # Poll AAD-only auth state to confirm propagation (defensive against multi-region delays)
+        Write-Progress-Step "Verifying Entra ID authentication is active" "Starting"
+        $adOnlyWaitStart = Get-Date
+        $maxAdOnlyWaitSeconds = 10
+        
+        while (-not $adOnlyReady -and ((Get-Date) - $adOnlyWaitStart).TotalSeconds -lt $maxAdOnlyWaitSeconds) {
+            $adOnlyStateArgs = @('sql', 'server', 'ad-only-auth', 'get', '--resource-group', $rg, '--server-name', $sqlServer, '--query', 'azureAdOnlyAuthentication', '--output', 'tsv')
+            $adOnlyStateResult = Invoke-AzCli -Arguments $adOnlyStateArgs
+            
+            if ($adOnlyStateResult.ExitCode -eq 0 -and $adOnlyStateResult.TrimmedText -eq 'true') {
+                $adOnlyReady = $true
+                break
+            } else {
+                Start-Sleep -Seconds 2
+            }
+        }
+        
+        if ($adOnlyReady) {
+            Write-Progress-Step "Entra ID authentication verified active" "Success"
+            break
+        } elseif ($attempt -lt $maxAttempts) {
+            Write-Progress-Step "Entra ID auth not confirmed yet, retrying..." "Warning"
         }
     }
     
     if (-not $adOnlyReady) {
-        Write-Progress-Step "Entra ID auth state not confirmed, proceeding anyway" "Warning"
-    } else {
-        Write-Progress-Step "Entra ID authentication verified active" "Success"
+        Write-Progress-Step "Entra ID auth state not confirmed after $maxAttempts attempts, proceeding anyway" "Warning"
     }
 
     # Check free database capacity first (documented pattern: az sql db list-usages)
@@ -1222,13 +1357,14 @@ try {
     if (-not $canUseFree) {
         # Free tier unavailable or capacity check failed
         Write-Host "`nFree-tier database not available (may be region/subscription limited)" -ForegroundColor Yellow
+        Write-Host "Falling back to Basic DTU database (lowest paid tier - ~`$5/month)" -ForegroundColor Yellow
     }
 
     # Try creating free-tier DB if capacity available, fallback to smallest paid
     if ($canUseFree) {
-        Write-Progress-Step "Creating free-tier SQL Database" "Starting"
+        Update-ProgressUI -Step "Creating SQL database" -Status "Starting" -EstimatedTime 15
     } else {
-        Write-Progress-Step "Creating paid-tier SQL Database (free unavailable)" "Starting"
+        Update-ProgressUI -Step "Creating SQL database" -Status "Starting" -EstimatedTime 70
     }
     
     $dbStartTime = Get-Date
@@ -1249,157 +1385,25 @@ try {
     }
     
     if (-not $dbCreated) {
-        Write-Host "`nFalling back to Serverless database (PAID TIER)" -ForegroundColor Yellow
-        Write-Host "  Auto-pause enabled: 60 minutes of inactivity" -ForegroundColor Cyan
-        Write-Host "  Estimated cost when paused: ~`$5/month" -ForegroundColor Yellow
-        Write-Host "  Estimated cost if active 24/7: ~`$150/month" -ForegroundColor Red
-        
-        $proceed = Read-Host "`nContinue with paid database tier? (y/n) [n]"
-        if ($proceed -ne 'y') {
-            throw "Deployment cancelled - paid database tier not accepted by user"
-        }
-        
         $fallbackDbArgs = @(
             'sql', 'db', 'create',
             '--name', $sqlDb,
             '--server', $sqlServer,
             '--resource-group', $rg,
-            '--tags') +
-            $commonTagValues +
-            @('--compute-model', 'Serverless', '--tier', 'GeneralPurpose', '--min-capacity', '0.5', '--auto-pause-delay', '60', '--backup-storage-redundancy', 'Local')
+            '--edition', 'Basic',
+            '--service-objective', 'Basic',
+            '--tags') + $commonTagValues
         $fallbackDbResult = Invoke-AzCli -Arguments $fallbackDbArgs
         Assert-Success -ExitCode $fallbackDbResult.ExitCode -Message "Failed to create fallback SQL database" -CommandOutput $fallbackDbResult.Text
-        $dbType = "Serverless (paid)"
+        $dbType = "Basic DTU (paid)"
     }
     
     $dbElapsed = [math]::Round(((Get-Date) - $dbStartTime).TotalSeconds, 1)
     Update-ProgressUI -Step "Creating SQL database" -Status "Success" -Extra "$sqlDb ($dbType)" -ElapsedTime $dbElapsed
 
-    # Storage Account + File Share for dab-config.json
-    # Use hash-based naming to avoid collisions from timestamp reuse
-    $rgHash = [BitConverter]::ToString([System.Security.Cryptography.SHA256]::Create().ComputeHash([System.Text.Encoding]::UTF8.GetBytes($rg))).Replace("-", "").Substring(0, 8).ToLowerInvariant()
-    $storageAccount = "stg$rgHash$runTimestamp" -replace '-', ''
-    $storageAccount = $storageAccount.ToLowerInvariant()
-    # Validate storage account name (3-24 chars, lowercase alphanumerics only)
-    $storageAccount = Assert-ResourceNameLength -Name $storageAccount -ResourceType 'StorageAccount'
-    
-    Update-ProgressUI -Step "Creating storage account" -Status "Starting"
-    $storageStartTime = Get-Date
-    $storageArgs = @('storage', 'account', 'create', '--name', $storageAccount, '--resource-group', $rg, '--location', $Region, '--sku', 'Standard_LRS', '--kind', 'StorageV2', '--tags') + $commonTagValues
-    $storageResult = Invoke-AzCli -Arguments $storageArgs
-    Assert-Success -ExitCode $storageResult.ExitCode -Message "Failed to create storage account" -CommandOutput $storageResult.Text
-    $storageElapsed = [math]::Round(((Get-Date) - $storageStartTime).TotalSeconds, 1)
-    
-    # Get storage account key
-    Write-Progress-Step "  Retrieving storage account key" "Info"
-    $storageKeyArgs = @('storage', 'account', 'keys', 'list', '--account-name', $storageAccount, '--resource-group', $rg, '--query', '[0].value', '--output', 'tsv')
-    $storageKeyResult = Invoke-AzCli -Arguments $storageKeyArgs
-    Assert-Success -ExitCode $storageKeyResult.ExitCode -Message "Failed to retrieve storage key" -CommandOutput $storageKeyResult.Text
-    $storageKey = $storageKeyResult.TrimmedText
-    Update-ProgressUI -Step "Creating storage account" -Status "Success" -Extra $storageAccount -ElapsedTime $storageElapsed
-    
-    # SECURITY: Storage key will be redacted from transcript at end of deployment
-    
-    # NOTE: For production, consider:
-    # 1. Rotating storage keys periodically: az storage account keys renew --account-name $storageAccount --key primary
-    # 2. Using managed identity-based mounts when GA for Container Apps (currently in preview)
-    # 3. Storing keys in Azure Key Vault instead of script memory
-    # 4. User-assigned MI with "Storage File Data SMB Share Contributor" role (preview, more secure than key-based auth)
-    
-    # Create file share with unique name per deployment
-    Write-Progress-Step "Creating Azure File Share" "Starting"
-    $fileShareArgs = @('storage', 'share', 'create', '--name', $storageShareName, '--account-name', $storageAccount, '--account-key', $storageKey, '--quota', $Config.StorageShareQuotaGb.ToString())
-    $fileShareResult = Invoke-AzCli -Arguments $fileShareArgs
-    Assert-Success -ExitCode $fileShareResult.ExitCode -Message "Failed to create file share" -CommandOutput $fileShareResult.Text
-    Write-Progress-Step "Azure File Share created" "Success" $storageShareName
-    
-    # Upload dab-config.json to file share (with path quoting for safety)
-    if (Test-Path $ConfigPath) {
-        Write-Progress-Step "Uploading dab-config.json to file share" "Starting"
-        $configFilePath = (Resolve-Path $ConfigPath).Path
-        
-        # Retry upload to handle transient 429s or propagation delays
-        $uploadSuccess = $false
-        $uploadRetries = 0
-        $maxUploadRetries = 3
-        
-        while (-not $uploadSuccess -and $uploadRetries -lt $maxUploadRetries) {
-            $uploadRetries++
-            
-            # Quote the source path to handle spaces safely
-            $uploadArgs = @('storage', 'file', 'upload', '--account-name', $storageAccount, '--account-key', $storageKey, '--share-name', $storageShareName, '--source', "`"$configFilePath`"", '--path', 'dab-config.json')
-            $uploadResult = Invoke-AzCli -Arguments $uploadArgs
-            
-            if ($uploadResult.ExitCode -eq 0) {
-                $uploadSuccess = $true
-            } elseif ($uploadRetries -lt $maxUploadRetries) {
-                $waitSeconds = 5 * $uploadRetries
-                Write-Progress-Step "Upload transient failure, retrying in $waitSeconds seconds (attempt $uploadRetries/$maxUploadRetries)" "Warning"
-                Start-Sleep $waitSeconds
-            }
-        }
-        
-        if (-not $uploadSuccess) {
-            Assert-Success -ExitCode $uploadResult.ExitCode -Message "Failed to upload dab-config.json after $maxUploadRetries attempts" -CommandOutput $uploadResult.Text
-        }
-        
-        Write-Progress-Step "dab-config.json uploaded to file share" "Success"
-    } else {
-        throw "dab-config.json file validation failed at path: $ConfigPath"
-    }
-    $configPath = "$configMountPath/dab-config.json"
-
-    # Add storage to Container Apps environment
-    # NOTE: Using ReadOnly mode - if DAB needs write access for logs/cache, change to ReadWrite
-    Write-Progress-Step "Adding storage to Container Apps environment" "Starting"
-    
-    # Idempotent: delete existing env storage if present (prevents "already exists" on re-runs)
-    $envStorageDeleteArgs = @('containerapp', 'env', 'storage', 'delete', '--name', $acaEnv, '--resource-group', $rg, '--storage-name', 'dab-config-storage', '--yes')
-    $null = Invoke-AzCli -Arguments $envStorageDeleteArgs
-    # Ignore errors (storage may not exist on first run)
-    
-    $envStorageArgs = @(
-        'containerapp', 'env', 'storage', 'set',
-        '--name', $acaEnv,
-        '--resource-group', $rg,
-        '--storage-name', 'dab-config-storage',
-        '--azure-file-account-name', $storageAccount,
-        '--azure-file-account-key', $storageKey,
-        '--azure-file-share-name', $storageShareName,
-        '--access-mode', 'ReadOnly'
-    )
-    $envStorageResult = Invoke-AzCli -Arguments $envStorageArgs
-    Assert-Success -ExitCode $envStorageResult.ExitCode -Message "Failed to add storage to environment" -CommandOutput $envStorageResult.Text
-    Write-Progress-Step "Storage added to environment" "Success"
-    
-    # Clear storage key from memory for security hygiene
-    Remove-Variable -Name storageKey -ErrorAction SilentlyContinue
-    [System.GC]::Collect()  # Force garbage collection to scrub sensitive data from memory
-    
-    # Verify storage mount is ready with polling (max 30 seconds)
-    Write-Progress-Step "Verifying storage mount readiness" "Starting"
-    $storageReady = $false
-    $maxWaitSeconds = 30
-    $waitStart = Get-Date
-    
-    while (-not $storageReady -and ((Get-Date) - $waitStart).TotalSeconds -lt $maxWaitSeconds) {
-        $storageCheckArgs = @('containerapp', 'env', 'storage', 'show', '--name', $acaEnv, '--resource-group', $rg, '--storage-name', 'dab-config-storage', '--query', 'properties.azureFile.shareName', '--output', 'tsv')
-        $storageCheckResult = Invoke-AzCli -Arguments $storageCheckArgs
-        
-        if ($storageCheckResult.ExitCode -eq 0 -and $storageCheckResult.TrimmedText -eq $storageShareName) {
-            $storageReady = $true
-        } else {
-            Start-Sleep -Seconds 2
-        }
-    }
-    
-    if (-not $storageReady) {
-        throw "Storage mount did not become ready within $maxWaitSeconds seconds"
-    }
-    Write-Progress-Step "Storage mount verified and ready" "Success"
-
-    # Container + Identity
-    Write-Progress-Step "Creating Container App with Data API Builder" "Starting"
+    # Container App deployment (config baked into Docker image)
+    # Connection string will be injected via environment variables    # Container + Identity
+    Update-ProgressUI -Step "Creating Container App with managed identity" -Status "Starting" -EstimatedTime 45
     
     # Check token before container creation
     [void](Test-AzureTokenExpiry -ExpiryBufferMinutes 5)
@@ -1407,8 +1411,15 @@ try {
     $containerStartTime = Get-Date
     Start-Heartbeat -Message "Creating Container App with DAB image"
     
-    # Use modern --mounts JSON array syntax (preferred over deprecated --bind-mount)
-    $mountsJson = '[{"volumeName":"dab-config-storage","mountPath":"' + $configMountPath + '"}]'
+    # Build connection string with managed identity authentication
+    $connectionString = "Server=tcp:${sqlServerFqdn},1433;Database=${sqlDb};Authentication=Active Directory Managed Identity;"
+    
+    # Environment variables: connection string and config file path
+    # Config is baked into the Docker image at /App/dab-config.json
+    $envVars = @(
+        "MSSQL_CONNECTION_STRING=$connectionString",
+        "Runtime__ConfigFile=/App/dab-config.json"
+    )
     
     $containerArgs = @(
         'containerapp', 'create',
@@ -1420,8 +1431,8 @@ try {
         '--memory', $Config.ContainerMemory,
         '--assign-identity', 'system',
         '--ingress', 'external', '--target-port', '5000',
-        '--tags'
-    ) + $commonTagValues + @('--mounts', $mountsJson)
+        '--set-env-vars'
+    ) + $envVars + @('--tags') + $commonTagValues
     
     $containerCreateResult = Invoke-AzCli -Arguments $containerArgs
     Stop-Heartbeat
@@ -1492,31 +1503,8 @@ try {
     Write-Progress-Step "SQL Database permissions granted to managed identity" "Success" $sqlUserName
 
     # Update container with connection string (Managed Identity)
-    Write-Progress-Step "Configuring DAB connection string" "Starting"
-    # Use explicit "Active Directory Managed Identity" instead of "Active Directory Default"
-    # This prevents credential chain confusion if AZURE_* env vars are set
-    $connectionString = "Server=tcp:${sqlServerFqdn},1433;Database=${sqlDb};Authentication=Active Directory Managed Identity;"
-    $configPath = "$configMountPath/dab-config.json"
-    
-    # CLI expects space-separated key=value pairs (no quotes around values per docs)
-    # MSSQL_CONNECTION_STRING matches the @env() reference in dab-config.json
-    $envVars = @(
-        "MSSQL_CONNECTION_STRING=$connectionString",
-        "Runtime__ConfigFile=$configPath"
-    )
-    
-    $updateArgs = @(
-        'containerapp', 'update',
-        '--name', $container,
-        '--resource-group', $rg,
-        '--set-env-vars'
-    ) + $envVars
-    $containerUpdateResult = Invoke-AzCli -Arguments $updateArgs
-    Assert-Success -ExitCode $containerUpdateResult.ExitCode -Message "Failed to update container configuration" -CommandOutput $containerUpdateResult.Text
-    Write-Progress-Step "DAB connection string configured" "Success"
-    
     # Restart container to ensure MI is fully propagated before DAB starts
-    Write-Progress-Step "Restarting container to activate configuration" "Starting"
+    Write-Progress-Step "Restarting container to activate managed identity" "Starting"
     $restartArgs = @('containerapp', 'revision', 'restart', '--name', $container, '--resource-group', $rg)
     $restartResult = Invoke-AzCli -Arguments $restartArgs
     Assert-Success -ExitCode $restartResult.ExitCode -Message "Failed to restart container" -CommandOutput $restartResult.Text
@@ -1586,6 +1574,107 @@ try {
         throw "database.sql file validation failed at path: $DatabasePath"
     }
 
+    # Validate DAB configuration with real database connection
+    Write-Progress-Step "Validating DAB configuration against database" "Starting"
+    
+    # Build validation connection string with full SQL Server details
+    # Port 1433, database name, and managed identity authentication
+    $validationConnectionString = "Server=tcp:${sqlServerFqdn},1433;Database=${sqlDb};Authentication=Active Directory Default;"
+    
+    # Create temporary container job to run validation
+    $validationJobName = "dab-validate-$($runTimestamp.Substring(8))"
+    
+    Write-Host "  Running 'dab validate' in temporary container with real connection string..." -ForegroundColor DarkGray
+    
+    $validationArgs = @(
+        'containerapp', 'job', 'create',
+        '--name', $validationJobName,
+        '--resource-group', $rg,
+        '--environment', $acaEnv,
+        '--image', $ContainerImage,
+        '--trigger-type', 'Manual',
+        '--replica-timeout', '300',
+        '--replica-retry-limit', '0',
+        '--parallelism', '1',
+        '--replica-completion-count', '1',
+        '--command', '/bin/sh', '-c', 'dotnet tool install --global Microsoft.DataApiBuilder && export PATH="$PATH:/root/.dotnet/tools" && dab validate --config /App/dab-config.json',
+        '--assign-identity', 'system',
+        '--set-env-vars', "MSSQL_CONNECTION_STRING=$validationConnectionString"
+    )
+    
+    $validationCreateResult = Invoke-AzCli -Arguments $validationArgs
+    
+    if ($validationCreateResult.ExitCode -eq 0) {
+        Write-Host "  Validation job created, granting SQL access..." -ForegroundColor DarkGray
+        
+        # Get validation job managed identity
+        $validationPrincipalArgs = @('containerapp', 'job', 'show', '--name', $validationJobName, '--resource-group', $rg, '--query', 'identity.principalId', '--output', 'tsv')
+        $validationPrincipalResult = Invoke-AzCli -Arguments $validationPrincipalArgs
+        
+        if ($validationPrincipalResult.ExitCode -eq 0 -and -not [string]::IsNullOrWhiteSpace($validationPrincipalResult.TrimmedText)) {
+            $validationPrincipalId = $validationPrincipalResult.TrimmedText
+            
+            # Get service principal display name
+            $validationSpNameArgs = @('ad', 'sp', 'show', '--id', $validationPrincipalId, '--query', 'displayName', '--output', 'tsv')
+            $validationSpNameResult = Invoke-AzCli -Arguments $validationSpNameArgs
+            
+            if ($validationSpNameResult.ExitCode -eq 0 -and -not [string]::IsNullOrWhiteSpace($validationSpNameResult.TrimmedText)) {
+                $validationSpName = $validationSpNameResult.TrimmedText
+                
+                # Grant SQL access to validation job
+                $validationSqlGrant = @"
+CREATE USER [$validationSpName] FROM EXTERNAL PROVIDER;
+ALTER ROLE db_datareader ADD MEMBER [$validationSpName];
+"@
+                sqlcmd -S $sqlServerFqdn -d $sqlDb -G -Q $validationSqlGrant -ErrorAction SilentlyContinue | Out-Null
+                
+                Write-Host "  Starting validation job..." -ForegroundColor DarkGray
+                
+                # Start validation job
+                $validationStartArgs = @('containerapp', 'job', 'start', '--name', $validationJobName, '--resource-group', $rg)
+                $validationStartResult = Invoke-AzCli -Arguments $validationStartArgs
+                
+                if ($validationStartResult.ExitCode -eq 0) {
+                    # Wait for job to complete (max 60 seconds)
+                    $validationWaitStart = Get-Date
+                    $validationSuccess = $false
+                    
+                    while (((Get-Date) - $validationWaitStart).TotalSeconds -lt 60) {
+                        Start-Sleep -Seconds 5
+                        
+                        $validationStatusArgs = @('containerapp', 'job', 'execution', 'list', '--name', $validationJobName, '--resource-group', $rg, '--query', '[0].properties.status', '--output', 'tsv')
+                        $validationStatusResult = Invoke-AzCli -Arguments $validationStatusArgs
+                        
+                        if ($validationStatusResult.ExitCode -eq 0) {
+                            $status = $validationStatusResult.TrimmedText
+                            
+                            if ($status -eq 'Succeeded') {
+                                $validationSuccess = $true
+                                break
+                            } elseif ($status -eq 'Failed') {
+                                break
+                            }
+                        }
+                    }
+                    
+                    if ($validationSuccess) {
+                        Write-Progress-Step "DAB configuration validated successfully against database" "Success"
+                    } else {
+                        Write-Progress-Step "DAB validation completed with warnings (proceeding anyway)" "Warning"
+                    }
+                } else {
+                    Write-Progress-Step "Unable to start validation job (proceeding anyway)" "Warning"
+                }
+            }
+        }
+        
+        # Cleanup validation job (async, don't wait)
+        Write-Host "  Cleaning up validation job..." -ForegroundColor DarkGray
+        Invoke-AzCli -Arguments @('containerapp', 'job', 'delete', '--name', $validationJobName, '--resource-group', $rg, '--yes', '--no-wait') | Out-Null
+    } else {
+        Write-Progress-Step "Unable to create validation job (proceeding anyway)" "Warning"
+    }
+
     # Get container app URL for summary  
     $containerShowArgs = @('containerapp', 'show', '--name', $container, '--resource-group', $rg, '--query', 'properties.configuration.ingress.fqdn', '--output', 'tsv')
     $containerShowResult = Invoke-AzCli -Arguments $containerShowArgs
@@ -1628,9 +1717,9 @@ try {
     $totalTimeFormatted = "${totalTime}m"
 
     Write-DeploymentSummary -ResourceGroup $rg -Region $Region -SqlServer $sqlServer -SqlDatabase $sqlDb `
-        -Container $container -ContainerUrl $containerUrl -ConfigPath $configPath -LogAnalytics $logAnalytics `
+        -Container $container -ContainerUrl $containerUrl -LogAnalytics $logAnalytics `
         -Environment $acaEnv -CurrentUser $currentUserName -DatabaseType $dbType -TotalTime $totalTimeFormatted `
-        -ClientIp $clientIp -StorageAccount $storageAccount -FileShare $storageShareName -SqlServerFqdn $sqlServerFqdn `
+        -ClientIp $clientIp -SqlServerFqdn $sqlServerFqdn `
         -FirewallRuleName $firewallRuleName
 
     # Save deployment summary as JSON for auditability
@@ -1648,9 +1737,6 @@ try {
             ContainerUrl = $containerUrl
             LogAnalytics = $logAnalytics
             Environment = $acaEnv
-            StorageAccount = $storageAccount
-            FileShare = $storageShareName
-            ConfigFilePath = $configPath
         }
         DeploymentTime = $totalTimeFormatted
         CurrentUser = $currentUserName
@@ -1666,22 +1752,17 @@ try {
     # Stop transcript and redact sensitive data
     Stop-Transcript | Out-Null
     
-    # Redact storage keys from transcript for security
+    # Redact sensitive keys from transcript for security
     if (Test-Path $transcriptPath) {
         try {
             $transcriptContent = Get-Content $transcriptPath -Raw -ErrorAction Stop
             
-            # Redact storage account keys
-            if ($storageKey) {
-                $transcriptContent = $transcriptContent -replace [regex]::Escape($storageKey), "***REDACTED_STORAGE_KEY***"
-            }
-            
-            # Redact Log Analytics workspace key
+            # Redact Log Analytics workspace key (if captured)
             if ($lawPrimaryKey) {
                 $transcriptContent = $transcriptContent -replace [regex]::Escape($lawPrimaryKey), "***REDACTED_LAW_KEY***"
             }
             
-            # Redact any other base64-like keys (defensive)
+            # Redact any base64-like keys (defensive)
             $transcriptContent = $transcriptContent -replace '([A-Za-z0-9+/]{64,}==?)', '***REDACTED_KEY***'
             
             # Write redacted content back
@@ -1705,12 +1786,8 @@ try {
 } catch {
     Write-Host "`n" # New line for spacing
     Write-Host ("=" * 85) -ForegroundColor Red
-    Write-Host "DEPLOYMENT FAILED" -ForegroundColor Red -BackgroundColor Black
+    Write-Host "DEPLOYMENT FAILED - ROLLING BACK" -ForegroundColor Red -BackgroundColor Black
     Write-Host ("=" * 85) -ForegroundColor Red
-    
-    # Show simplified error
-    $simplifiedError = Get-SimplifiedError -ErrorMessage $_.Exception.Message
-    Write-Host "`nError: $simplifiedError" -ForegroundColor Yellow
     
     # Stop transcript and redact sensitive data
     try { 
@@ -1719,9 +1796,6 @@ try {
         if (Test-Path $transcriptPath) {
             $transcriptContent = Get-Content $transcriptPath -Raw -ErrorAction SilentlyContinue
             if ($transcriptContent) {
-                if ($storageKey) {
-                    $transcriptContent = $transcriptContent -replace [regex]::Escape($storageKey), "***REDACTED_STORAGE_KEY***"
-                }
                 if ($lawPrimaryKey) {
                     $transcriptContent = $transcriptContent -replace [regex]::Escape($lawPrimaryKey), "***REDACTED_LAW_KEY***"
                 }
@@ -1731,46 +1805,32 @@ try {
         }
     } catch { }
     
+    # Auto-cleanup resources (no prompt)
+    if ($rg) {
+        Write-Host "`nCleaning up partial deployment..." -ForegroundColor Yellow
+        try {
+            $deleteResult = Invoke-AzCli -Arguments @('group', 'delete', '--name', $rg, '--yes', '--no-wait')
+            if ($deleteResult.ExitCode -eq 0) {
+                Write-Host "Resource group deletion initiated (running in background): $rg" -ForegroundColor Green
+            } else {
+                Write-Host "Note: Resource group may need manual cleanup: $rg" -ForegroundColor DarkYellow
+            }
+        } catch {
+            Write-Host "Note: Resource group may need manual cleanup: $rg" -ForegroundColor DarkYellow
+        }
+    }
+    
     # Auto-open log file for debugging
     if (Test-Path $transcriptPath) {
         Write-Host "`nOpening log file for troubleshooting..." -ForegroundColor Cyan
         try {
             Start-Process notepad $transcriptPath
         } catch {
-            Write-Host "Could not open log file automatically. Please review: $transcriptPath" -ForegroundColor Yellow
+            Write-Host "Log file available at: $transcriptPath" -ForegroundColor DarkGray
         }
     }
     
-    # Offer to cleanup resources
-    if ($rg) {
-        Write-Host "`nPartial resources were created in resource group: $rg" -ForegroundColor DarkYellow
-        Write-Host "Would you like to delete the resource group to cleanup? (Y/n) [Y]: " -NoNewline -ForegroundColor White
-        $response = Read-Host
-        
-        if ($response -eq '' -or $response -match '^[Yy]') {
-            Write-Host "`nDeleting resource group $rg..." -ForegroundColor Yellow
-            try {
-                $deleteResult = Invoke-AzCli -Arguments @('group', 'delete', '--name', $rg, '--yes', '--no-wait')
-                if ($deleteResult.ExitCode -eq 0) {
-                    Write-Host "Resource group deletion initiated (running in background)" -ForegroundColor Green
-                } else {
-                    Write-Host "Failed to delete resource group. Please delete manually:" -ForegroundColor Red
-                    Write-Host "az group delete -n $rg -y" -ForegroundColor White
-                }
-            } catch {
-                Write-Host "Failed to delete resource group. Please delete manually:" -ForegroundColor Red
-                Write-Host "az group delete -n $rg -y" -ForegroundColor White
-            }
-        } else {
-            Write-Host "`nResource group preserved. To cleanup later, run:" -ForegroundColor Yellow
-            Write-Host "az group delete -n $rg -y" -ForegroundColor White
-        }
-    }
-    
-    Write-Host "`nFor all resources created by this script:" -ForegroundColor DarkYellow
-    Write-Host "az group list --tag author=dab-deploy-demo-script" -ForegroundColor White
-    
-    # PowerShell will exit with non-zero status due to throw
+    # Exit with error code (PowerShell will handle this)
     throw
 } finally {
     $ErrorActionPreference = 'Continue'
