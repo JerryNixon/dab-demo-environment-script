@@ -2,8 +2,6 @@
 
 Automated deployment of **Data API Builder (DAB)** on **Azure Container Apps (ACA)** using **Azure SQL Database** with **Entra ID authentication** and **baked-in configuration** via custom Docker image.
 
-**Version 0.0.1** | **Optimized for security, reliability, and simplicity**
-
 ## Quick Start
 
 Ensure these files are in your working directory:
@@ -22,17 +20,21 @@ Then run:
 
 ## What Gets Deployed
 
-* **Azure SQL Database** (tries free tier with fallback to Basic paid tier) with **Entra ID-only authentication**
-* **Azure Container Registry** (ACR Basic) with **managed identity authentication** (no anonymous pull)
-* **Azure Container App** running DAB with **system-assigned managed identity** and **registry-identity authentication**
-* **SQL Server firewall rule** (allows all IPs: 0.0.0.0-255.255.255.255 for demo purposes)
-* **Log Analytics workspace** for container diagnostics (90-day retention)
-* **AcrPull role assignment** for managed identity with propagation verification
-* **SQL roles (reader/writer)** with **TRY/CATCH error handling** and **exponential backoff retry** (12 attempts, up to 240s)
-* **Custom Docker image** with `dab-config.json` baked in
-* **DAB health check verification** (5 attempts, 10s intervals)
+```
+Resource Group
+ ├─ SQL Server
+ │   └─ SQL Database
+ ├─ Azure Container Registry
+ ├─ Azure Log Analytics Workspace
+ ├─ Azure Container App Environment
+ └─ Azure Container App Container: Data API builder (DAB)
+```
 
-All resources tagged with: `author=dab-deploy-demo-script`, `version=<script-version>`, `owner=<your-username>`
+### Resource tags
+
+ - `author=dab-deploy-demo-script`
+ - `version=<script-version>`
+ - `owner=<your-username>`
 
 ## Prerequisites
 
@@ -41,12 +43,9 @@ All resources tagged with: `author=dab-deploy-demo-script`, `version=<script-ver
 * **Azure CLI** - [Install](https://aka.ms/installazurecliwindows)
 * **DAB CLI** - Required for configuration validation
 * **sqlcmd** - Auto-installed via winget if available
+* **Contributor** or **Owner** role on target subscription
 
-### Required Permissions
-* Azure **Contributor** or **Owner** role on target subscription
-* Permissions validated at script startup (fails fast if insufficient)
-
-## Required Files
+## 3 required Files
 
 ### `database.sql`
 Your SQL schema and optional seed data. Executed using Entra ID authentication after database creation.
@@ -62,40 +61,10 @@ DAB configuration file **must** reference the connection string as:
 }
 ```
 
-The script validates this before deployment and runs a pre-deployment validation job to catch configuration errors early.
-
 ### `Dockerfile`
-Builds a custom image with your config baked in. Uses the official DAB base image. Container Apps provides platform-level health probes via TCP port checks, so Docker HEALTHCHECK directives are not needed.
+(Provided) Builds a custom image with your config baked in. 
 
-## Deployment Flow
-
-1. **Prerequisites Check** - Validates Azure CLI, DAB CLI, sqlcmd, required files
-2. **Azure Login** - Ensures correct subscription context
-3. **Tenant & Subscription Pinning** - Captures IDs for explicit scoping (multi-tenant safety)
-4. **Resource Group Creation** - Creates timestamped resource group
-5. **Entra ID User Lookup** - Gets current user for SQL admin
-6. **SQL Server Creation** - Creates with Entra-only authentication
-7. **Firewall Configuration** - Adds 0.0.0.0-255.255.255.255 (demo-friendly, not production)
-8. **Entra ID Authentication Verification** - Exponential backoff (10 attempts, 1.7x multiplier, 120s cap)
-9. **Free-Tier Capacity Check** - Checks if free database is available
-10. **SQL Database Creation** - Creates free-tier or Basic paid database
-11. **Database Schema Deployment** - Executes `database.sql` with error logging
-12. **DAB Config Validation** - Validates configuration using DAB CLI
-13. **Log Analytics Workspace** - Creates with 90-day retention
-14. **Container Apps Environment** - Provisions ACA environment (2-3 minutes)
-15. **Azure Container Registry** - Creates ACR Premium with admin disabled
-16. **Custom Image Build** - Builds DAB image with config baked in (via ACR build task)
-17. **Container App Creation** - Single-step creation with ACR image, MI, and env vars
-18. **AcrPull Role Assignment** - Grants ACR pull permission to managed identity
-19. **Service Principal Lookup** - Gets MI display name using `az ad sp show` (exponential backoff, 20 attempts)
-20. **SQL Access Grant** - Grants MI database permissions with T-SQL TRY/CATCH (12 attempts, exponential backoff)
-21. **Container Restart** - Activates managed identity authentication
-22. **Container Running Verification** - Confirms container is active (crash loop detection)
-23. **DAB Health Check** - Verifies API responding (5 attempts, 10s intervals)
-24. **Deployment Summary** - Outputs complete resource details and URLs
-25. **Portal Launch** - Opens Azure Portal (unless -NoBrowser specified)
-
-## Parameters
+## Parameters (all are optional)
 
 ### `-Region` (string)
 Azure region for deployment. Default: `westus2`
@@ -141,35 +110,9 @@ Preserves resource group on deployment failure for debugging. Default behavior d
 .\script.ps1 -NoCleanup
 ```
 
-
-
-## Example Usage
-
-### Basic Deployment
-```powershell
-.\script.ps1
-```
-
-### Production Deployment (Different Region)
-```powershell
-.\script.ps1 -Region eastus -DatabasePath .\prod-schema.sql -ConfigPath .\prod-config.json
-```
-
-### CI/CD Deployment (Non-interactive)
-```powershell
-.\script.ps1 -Force -NoBrowser
-```
-
-### Debug Failed Deployment
-```powershell
-.\script.ps1 -NoCleanup
-```
-
 ## Example Output
 
-The script provides real-time progress with **estimated duration** and **ETA timestamps** for each deployment step:
-
-```
+```sh
 dab-deploy-demo version 0.0.1
 
 Checking prerequisites...
@@ -295,75 +238,9 @@ Opening Azure Portal...
 
 ## Features
 
-### Recent Improvements (v0.0.1)
-
-**Security Enhancements:**
-- ✅ **Disabled ACR anonymous pull** - Uses managed identity with AcrPull role assignment
-- ✅ **Added --registry-identity system** - Container App pulls images using its managed identity
-- ✅ **T-SQL TRY/CATCH blocks** - SQL user grant operations have proper error handling
-
-**Reliability Improvements:**
-- ✅ **Single-step Container App creation** - Eliminates "public image then swap" workaround
-- ✅ **Exponential backoff for Entra ID** - 1.7x multiplier, 120s cap (was fixed 30s waits)
-- ✅ **Simplified MI lookup** - Uses only `az ad sp show` (removed Graph API fallback)
-- ✅ **Tenant & subscription pinning** - Explicit IDs prevent multi-tenant context issues
-
-**Code Quality:**
-- ✅ **Consolidated logging** - Single `cli.log` with [OK] and [ERR] tags (was separate out/err files)
-- ✅ **Optional cleanup** - `-NoCleanup` switch preserves failed deployments for debugging
-- ✅ **Resource names in success messages** - "sql-server-20251107... (78.4s)" instead of just timing
-- ✅ **Removed Test-NetConnection** - Windows-specific, non-essential check eliminated
-
-### Core Features
-
-**Timing & Race Condition Handling:**
-- **Entra ID propagation** - Exponential backoff retry (10 attempts, 1.7x multiplier, 120s cap)
-- **SQL MI propagation retry** - 12 attempts with exponential backoff and jitter (up to 240s)
-- **Service Principal lookup** - 20 attempts with exponential backoff (1.8x multiplier)
-- **DAB health check retries** - 5 attempts, 10s intervals
-- **Free-tier capacity check** - Automatic fallback to Basic paid tier
-
-**Security:**
 - Entra ID-only authentication (no SQL passwords)
-- Managed identity with least-privilege database roles
-- ACR authentication via managed identity (no admin credentials)
-- Firewall configured for all IPs (demo-friendly; customize for production)
-
-**Observability:**
-- Real-time progress tracking with resource names in success messages
-- Consolidated logging to single timestamped `cli.log` file ([OK]/[ERR] tags)
-- Container Apps logs integrated with Log Analytics (90-day retention)
-- Success banner on completion
-
-**Error Recovery:**
-- Exponential backoff retry logic for transient failures
-- Graceful degradation (free tier fallback, optional DAB validation)
-- Detailed error messages with remediation steps
-- Optional cleanup preservation via `-NoCleanup` for debugging
-
-## Script Architecture
-
-### Helper Functions
-- `Wait-Seconds` - Consistent wait operations with status output
-- `Write-StepStatus` - Standardized progress reporting (Started/Success/Error/Retrying/Info)
-- `OK` - Terse error checking (`OK $result "error message"`)
-- `Test-AzureTokenExpiry` - Azure token validation and refresh
-- `Get-MI-DisplayName` - Managed identity service principal lookup with exponential backoff
-- `Invoke-AzCli` - Azure CLI wrapper with consolidated logging ([OK]/[ERR] tags)
-- `Write-DeploymentSummary` - Formatted deployment summary output
-- `Assert-ResourceNameLength` - Validates Azure resource name lengths
-
-### Key Configuration Variables
-- `$Config.SqlRetryAttempts` - 12 attempts for SQL user grant
-- `$Config.LogRetentionDays` - 90 days for Log Analytics
-- `$Config.ContainerCpu` - 0.5 CPU cores
-- `$Config.ContainerMemory` - 1.0Gi RAM
-
-### Logging Strategy
-All Azure CLI commands logged to single `cli.log` file with:
-- Timestamp (ISO 8601)
-- Status tag ([OK] or [ERR])
-- Full command line
-- Complete output
-
-Location: `logs\<timestamp>\cli.log`
+- Managed identity for database and container registry access
+- Custom Docker image with config baked in (no secrets in environment variables)
+- Free-tier database with automatic fallback to paid tier if unavailable
+- Failed deployments auto-cleanup (or preserve with `-NoCleanup` for debugging)
+- Opens Azure Portal automatically when done (skip with `-NoBrowser`)

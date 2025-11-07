@@ -1098,10 +1098,14 @@ END CATCH
                     $replicaResult = Invoke-AzCli -Arguments $replicaArgs
                 
                     if ($replicaResult.ExitCode -eq 0) {
-                        $restartCount = $replicaResult.TrimmedText
-                        if ([string]::IsNullOrWhiteSpace($restartCount)) { $restartCount = "0" }
+                        # Remove WARNING lines and extract numeric value
+                        $restartCountRaw = $replicaResult.TrimmedText
+                        $restartCount = ($restartCountRaw -split "`n" | Where-Object { $_ -match '^\d+$' }) | Select-Object -First 1
+                        
+                        if (-not $restartCount) { $restartCount = 0 }
+                        [int]$restartCount = $restartCount
                     
-                        if ([int]$restartCount -lt 3) {
+                        if ($restartCount -lt 3) {
                             $containerRunning = $true
                             Write-StepStatus "" "Success" "$container running (restart count: $restartCount)"
                         } else {
