@@ -1,26 +1,25 @@
-# Multi-stage build for Data API Builder with baked-in configuration
-# This eliminates the need for Azure File Share and storage accounts
+ARG DAB_VERSION=1.7.75-rc
+FROM mcr.microsoft.com/azure-databases/data-api-builder:${DAB_VERSION}
 
-# Stage 1: Validation stage with DAB CLI
-FROM mcr.microsoft.com/dotnet/sdk:8.0-cbl-mariner2.0 AS build
-WORKDIR /config
+# redeclare ARG so it's in scope again after FROM
+ARG DAB_VERSION
 
-# Copy DAB configuration into the build stage
-COPY dab-config.json .
+LABEL org.opencontainers.image.title="dab-configured" \
+      org.opencontainers.image.description="Data API Builder with baked configuration for Azure deployment" \
+      org.opencontainers.image.version="${DAB_VERSION}" \
+      org.opencontainers.image.authors="data-api-builder@microsoft.com"
 
-# Install Data API Builder CLI for validation
-RUN dotnet new tool-manifest
-RUN dotnet tool install Microsoft.DataApiBuilder
+# Copy configuration (DAB looks for /App/dab-config.json by default)
+COPY dab-config.json /App/dab-config.json
+RUN chmod 444 /App/dab-config.json || true
 
-# Validation removed: environment variables (like MSSQL_CONNECTION_STRING) do not exist at build time.
-# Config will be validated post-deployment via `dab validate` job in Container Apps.
+# Note: Container Apps provides its own health probes at the platform level.
+# The /health endpoint requires runtime.health configuration in dab-config.json.
+# For simplicity, we rely on Container Apps TCP port checks rather than HTTP health checks.
+# If you need HTTP health checks, add runtime.health config to dab-config.json as per:
+# https://github.com/Azure/data-api-builder/blob/main/docs/design/HealthEndpoint.md
 
-# Stage 2: Runtime image with baked configuration
-FROM mcr.microsoft.com/azure-databases/data-api-builder:latest
+# Document default port (Container Apps may infer but this aids local runs)
+EXPOSE 5000
 
-# Copy validated configuration from build stage into /App directory
-# DAB expects config at /App/dab-config.json by default
-COPY --from=build /config/dab-config.json /App/dab-config.json
-
-# Connection string will be injected as environment variable via Container Apps secrets
-# No need for volume mounts or storage accounts
+# Connection string supplied at runtime via environment variable.
