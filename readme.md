@@ -38,14 +38,13 @@ Resource Group: dab-demo-<timestamp>
 
 ## Prerequisites
 
-### Required Software
 * **PowerShell 7+** (not Windows PowerShell 5.1)
 * **Azure CLI** - [Install](https://aka.ms/installazurecliwindows)
 * **DAB CLI** - Required for configuration validation
 * **sqlcmd** - Auto-installed via winget if available
 * **Contributor** or **Owner** role on target subscription
 
-## 3 required Files
+## Three required external files
 
 ### `database.sql`
 Your SQL schema and optional seed data. Executed using Entra ID authentication after database creation.
@@ -63,52 +62,6 @@ DAB configuration file **must** reference the connection string as:
 
 ### `Dockerfile`
 (Provided) Builds a custom image with your config baked in. 
-
-## Parameters (all are optional)
-
-### `-Region` (string)
-Azure region for deployment. Default: `westus2`
-
-Supported regions validated at startup.
-
-```powershell
-.\script.ps1 -Region eastus
-```
-
-### `-Force` (switch)
-Skips subscription confirmation prompt. Useful for CI/CD pipelines and automation.
-
-```powershell
-.\script.ps1 -Force
-```
-
-### `-DatabasePath` (string)
-Path to SQL database file. Default: `./database.sql`
-
-```powershell
-.\script.ps1 -DatabasePath "C:\databases\prod.sql"
-```
-
-### `-ConfigPath` (string)
-Path to DAB configuration file. Default: `./dab-config.json`
-
-```powershell
-.\script.ps1 -ConfigPath "C:\configs\prod-config.json"
-```
-
-### `-NoBrowser` (switch)
-Skips automatic Azure Portal launch after deployment. Useful for CI/CD.
-
-```powershell
-.\script.ps1 -NoBrowser
-```
-
-### `-NoCleanup` (switch)
-Preserves resource group on deployment failure for debugging. Default behavior deletes failed deployments automatically.
-
-```powershell
-.\script.ps1 -NoCleanup
-```
 
 ## Example Output
 
@@ -244,3 +197,49 @@ Opening Azure Portal...
 - Free-tier database with automatic fallback to paid tier if unavailable
 - Failed deployments auto-cleanup (or preserve with `-NoCleanup` for debugging)
 - Opens Azure Portal automatically when done (skip with `-NoBrowser`)
+
+## Parameters (all are optional)
+
+### `-Region` (string)
+Azure region for deployment. Default: `westus2`
+
+Supported regions validated at startup.
+
+```powershell
+.\script.ps1 -Region eastus
+```
+
+### `-Force` (switch)
+Skips subscription confirmation prompt. Useful for CI/CD pipelines and automation.
+
+```powershell
+.\script.ps1 -Force
+```
+
+### `-DatabasePath` (string)
+Path to SQL database file. Default: `./database.sql`
+
+```powershell
+.\script.ps1 -DatabasePath "C:\databases\prod.sql"
+```
+
+### `-ConfigPath` (string)
+Path to DAB configuration file. Default: `./dab-config.json`
+
+```powershell
+.\script.ps1 -ConfigPath "C:\configs\prod-config.json"
+```
+
+### `-NoBrowser` (switch)
+Skips automatic Azure Portal launch after deployment. Useful for CI/CD.
+
+```powershell
+.\script.ps1 -NoBrowser
+```
+
+### `-NoCleanup` (switch)
+Preserves resource group on deployment failure for debugging. Default behavior deletes failed deployments automatically.
+
+```powershell
+.\script.ps1 -NoCleanup
+```
