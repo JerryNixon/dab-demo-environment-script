@@ -32,6 +32,8 @@ Resource Group: dab-demo-<timestamp>
 
 ### Resource tags
 
+All resources are automatically tagged. 
+
  - `author=dab-deploy-demo-script`
  - `version=<script-version>`
  - `owner=<your-username>`
@@ -85,6 +87,8 @@ Current subscription:
   ID:   12345678-1234-1234-1234-123456789abc
 
 Deploy to this subscription? (y/n/list) [y]
+
+Starting deployment. Estimated time to complete: 8m (finish ~14:38:25)
 
 Creating resource group
 [Started] (est 3s at 14:30:25)

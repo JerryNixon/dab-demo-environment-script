@@ -154,7 +154,17 @@ if (-not (Get-Command sqlcmd -ErrorAction SilentlyContinue)) {
     }
 } else {
     Write-Host "  sqlcmd: " -NoNewline -ForegroundColor Yellow
-    Write-Host "Installed" -ForegroundColor Green
+    try {
+        $sqlcmdVersionOutput = & sqlcmd -? 2>&1 | Out-String
+        if ($sqlcmdVersionOutput -match 'Version\s+(\d+\.\d+\.\d+\.\d+)') {
+            $sqlcmdVersion = $Matches[1]
+            Write-Host "Installed ($sqlcmdVersion)" -ForegroundColor Green
+        } else {
+            Write-Host "Installed (version unknown)" -ForegroundColor Green
+        }
+    } catch {
+        Write-Host "Installed (version unknown)" -ForegroundColor Green
+    }
 }
 
 if (-not (Test-Path $DatabasePath)) {
@@ -563,10 +573,12 @@ if (-not $Force) {
         exit 0
     }
     
-    Write-Host "`nStarting deployment. Estimated time to complete: 8m" -ForegroundColor Cyan
+    $estimatedFinishTime = (Get-Date).AddMinutes(8).ToString("HH:mm:ss")
+    Write-Host "`nStarting deployment. Estimated time to complete: 8m (finish ~$estimatedFinishTime)" -ForegroundColor Cyan
 } else {
     Write-Host "  -Force specified: skipping confirmation" -ForegroundColor Yellow
-    Write-Host "`nStarting deployment. Estimated time to complete: 8m" -ForegroundColor Cyan
+    $estimatedFinishTime = (Get-Date).AddMinutes(8).ToString("HH:mm:ss")
+    Write-Host "`nStarting deployment. Estimated time to complete: 8m (finish ~$estimatedFinishTime)" -ForegroundColor Cyan
 }
 
 try {
