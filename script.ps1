@@ -4,7 +4,6 @@
 #   -Region: Azure region for deployment (default: westus2)
 #   -DatabasePath: Path to SQL database file - local or relative from script root (default: ./database.sql)
 #   -ConfigPath: Path to DAB config file - used to build custom image (default: ./dab-config.json)
-#   -NoBrowser: Skip opening Azure Portal after deployment (useful for CI/CD)
 #   -Force: Skip subscription confirmation prompt (useful for CI/CD automation)
 #   -NoCleanup: Preserve resource group on failure for debugging (default: auto-cleanup)
 #   -VerifyAdOnlyAuth: Verify Azure AD-only authentication is active (adds ~3min wait, optional)
@@ -17,7 +16,6 @@
 #   .\script.ps1
 #   .\script.ps1 -Region eastus
 #   .\script.ps1 -Region westeurope -DatabasePath ".\databases\prod.sql" -ConfigPath ".\configs\prod.json"
-#   .\script.ps1 -NoBrowser  # CI/CD mode
 #   .\script.ps1 -Force      # Skip confirmation prompts
 #   .\script.ps1 -NoCleanup  # Keep resources on failure for debugging
 #   .\script.ps1 -VerifyAdOnlyAuth  # Verify AD-only auth propagation (slower but more thorough)
@@ -26,7 +24,6 @@ param(
     [string]$Region = "westus2",
     [string]$DatabasePath = "./database.sql",
     [string]$ConfigPath = "./dab-config.json",
-    [switch]$NoBrowser,
     [switch]$Force,
     [switch]$NoCleanup,
     [switch]$VerifyAdOnlyAuth
@@ -847,7 +844,7 @@ try {
     
     $dabInstalled = Get-Command dab -ErrorAction SilentlyContinue
     if (-not $dabInstalled) {
-        if ($Force -or $NoBrowser) {
+        if ($Force) {
             Write-StepStatus "" "Error" "DAB CLI not found in CI/automation mode"
             throw "DAB CLI is required for validation in CI/automation mode. Install it before running this script."
         }
@@ -1163,19 +1160,19 @@ END CATCH
                     } else {
                         if ($healthRetry -lt $healthAttempts) {
                             Write-StepStatus "" "Retrying" "health check: $($healthResponse.status), retry $healthRetry/$healthAttempts"
-                            Wait-Seconds 10 "DAB health check"
+                            Start-Sleep -Seconds 10
                         } else {
                             Write-StepStatus "" "Info" "health check: $($healthResponse.status) - database may need verification"
                         }
                     }
                 } else {
                     if ($healthRetry -lt $healthAttempts) {
-                        Wait-Seconds 10 "DAB health check"
+                        Start-Sleep -Seconds 10
                     }
                 }
             } catch {
                 if ($healthRetry -lt $healthAttempts) {
-                    Wait-Seconds 10 "DAB health check"
+                    Start-Sleep -Seconds 10
                 } else {
                     Write-StepStatus "" "Info" "Unable to verify DAB API health (may still be starting)"
                     Write-Host "  Health endpoint: $healthUrl" -ForegroundColor DarkGray
@@ -1227,15 +1224,6 @@ END CATCH
     $deploymentSummary | ConvertTo-Json -Depth 3 | Out-File "dab-deploy-$runTimestamp.json" -Encoding UTF8
     
     Write-Host "`nDeployment log saved to: $script:CliLog" -ForegroundColor Green
-
-    if (-not $NoBrowser -and $Host.Name -ne 'ServerRemoteHost' -and $Host.Name -notlike '*Background*') {
-        Write-Host "`nOpening Azure Portal..." -ForegroundColor Cyan
-        try {
-            Start-Process "https://portal.azure.com/#view/HubsExtension/BrowseResourceGroups/resourceGroup/$rg"
-        } catch {
-            Write-Host "Portal opening not supported in this shell" -ForegroundColor DarkGray
-        }
-    }
 
 } catch {
     Write-Host "`n"

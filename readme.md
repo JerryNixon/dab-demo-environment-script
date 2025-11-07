@@ -189,8 +189,6 @@ ENDPOINTS
   Portal Container: https://portal.azure.com/...
   Portal Logs:      https://portal.azure.com/...
   Logs (CLI):       az containerapp logs show -n data-api-container -g dab-demo-20251106143022 --follow
-
-Opening Azure Portal...
 ```
 
 ## Features
@@ -200,7 +198,6 @@ Opening Azure Portal...
 - Custom Docker image with config baked in (no secrets in environment variables)
 - Free-tier database with automatic fallback to paid tier if unavailable
 - Failed deployments auto-cleanup (or preserve with `-NoCleanup` for debugging)
-- Opens Azure Portal automatically when done (skip with `-NoBrowser`)
 
 ## Parameters (all are optional)
 
@@ -232,13 +229,6 @@ Path to DAB configuration file. Default: `./dab-config.json`
 
 ```powershell
 .\script.ps1 -ConfigPath "C:\configs\prod-config.json"
-```
-
-### `-NoBrowser` (switch)
-Skips automatic Azure Portal launch after deployment. Useful for CI/CD.
-
-```powershell
-.\script.ps1 -NoBrowser
 ```
 
 ### `-NoCleanup` (switch)

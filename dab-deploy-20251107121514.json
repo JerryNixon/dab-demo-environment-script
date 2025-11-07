@@ -1,0 +1,23 @@
+{
+  "Resources": {
+    "ContainerUrl": "https://WARNING: The behavior of this command has been altered by the following extension: containerapp\r\ndata-api-container.orangepebble-fc3c8a3f.westus2.azurecontainerapps.io",
+    "Environment": "aca-environment",
+    "LogAnalytics": "log-workspace",
+    "Database": "sql-database",
+    "SqlServer": "sql-server-20251107121514",
+    "ContainerApp": "data-api-container"
+  },
+  "SubscriptionName": "DS-SQLDB-SQLAzurePMDemos_ajayj_COGS_42477",
+  "CurrentUser": "jnixon@microsoft.com",
+  "ResourceGroup": "dab-demo-20251107121514",
+  "Tags": {
+    "version": "0.0.1",
+    "author": "dab-deploy-demo-script",
+    "owner": "jnixon"
+  },
+  "DeploymentTime": "14.6m",
+  "Version": "0.0.1",
+  "Region": "westus2",
+  "Timestamp": "20251107121514",
+  "PowerShellVersion": "7.4.13"
+}
