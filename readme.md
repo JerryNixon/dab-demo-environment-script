@@ -21,13 +21,13 @@ Then run:
 ## What Gets Deployed
 
 ```
-Resource Group
+Resource Group: dab-demo-<timestamp>
  ├─ SQL Server
  │   └─ SQL Database
  ├─ Azure Container Registry
  ├─ Azure Log Analytics Workspace
- ├─ Azure Container App Environment
- └─ Azure Container App Container: Data API builder (DAB)
+ ├─ Azure Container Apps Environment
+ │   └─ Container App (runs Data API builder)
 ```
 
 ### Resource tags
