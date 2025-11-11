@@ -272,9 +272,8 @@ $subscriptionId = az account show --query id -o tsv
 
 function Wait-Seconds {
     param([int]$Seconds, [string]$Reason = "Waiting")
-    Write-StepStatus $Reason "Started" "$Seconds`s"
+    # Silent wait - just sleep without extra output
     Start-Sleep -Seconds $Seconds
-    Write-StepStatus "" "Success" "$Seconds`s"
 }
 
 function Write-StepStatus {
@@ -734,9 +733,9 @@ try {
     }
 
     if ($canUseFree) {
-        Write-StepStatus "Creating SQL database" "Started" "15s"
+        Write-StepStatus "Creating SQL database" "Started" "20s"
     } else {
-        Write-StepStatus "Creating SQL database" "Started" "70s"
+        Write-StepStatus "Creating SQL database" "Started" "60s"
     }
     
     $dbStartTime = Get-Date
@@ -906,7 +905,7 @@ try {
     OK $lawUpdateResult "Failed to update Log Analytics retention"
     Write-StepStatus "" "Success" "retention set to $($Config.LogRetentionDays) days"
 
-    Write-StepStatus "Creating Container Apps environment" "Started" "140s"
+    Write-StepStatus "Creating Container Apps environment" "Started" "2min"
     
     $acaStartTime = Get-Date
     $acaArgs = @('containerapp', 'env', 'create', '--name', $acaEnv, '--resource-group', $rg, '--location', $Region, '--logs-workspace-id', $lawCustomerId, '--logs-workspace-key', $lawPrimaryKey, '--tags') + $commonTagValues
@@ -915,7 +914,7 @@ try {
     $acaElapsed = [math]::Round(((Get-Date) - $acaStartTime).TotalSeconds, 1)
     Write-StepStatus "" "Success" "$acaEnv (${acaElapsed}s)"
 
-    Write-StepStatus "Creating Azure Container Registry" "Started" "20s"
+    Write-StepStatus "Creating Azure Container Registry" "Started" "25s"
     
     $acrStartTime = Get-Date
     $acrArgs = @('acr', 'create', '--resource-group', $rg, '--name', $acrName, '--sku', 'Basic', '--admin-enabled', 'false', '--tags') + $commonTagValues
@@ -942,7 +941,7 @@ try {
     
     $ContainerImage = $imageTag
 
-    Write-StepStatus "Creating Container App with managed identity" "Started" "40s"
+    Write-StepStatus "Creating Container App with managed identity" "Started" "50s"
     
     $connectionString = "Server=tcp:${sqlServerFqdn},1433;Database=${sqlDb};Authentication=Active Directory Managed Identity;"
     
@@ -1062,7 +1061,7 @@ END CATCH
     $sqlElapsed = [math]::Round(((Get-Date) - $sqlStartTime).TotalSeconds, 0)
     Write-StepStatus "" "Success" "$sqlUserName granted access to $sqlDb (${sqlElapsed}s)"
     
-    Write-StepStatus "Verifying SQL permissions" "Started" "3s"
+    Write-StepStatus "Verifying SQL permissions" "Started" "5s"
     $verifyStartTime = Get-Date
     
     try {
@@ -1101,21 +1100,21 @@ WHERE dp.name = '$escapedUserName';
             
             if ($hasExecute) {
                 $verifyElapsed = [math]::Round(((Get-Date) - $verifyStartTime).TotalSeconds, 1)
-                Write-StepStatus "" "Success" "Permissions verified: db_datareader, db_datawriter, EXECUTE (${verifyElapsed}s)"
+                Write-StepStatus "" "Success" "db_datareader + db_datawriter + EXECUTE verified for $sqlUserName (${verifyElapsed}s)"
             } else {
                 $verifyElapsed = [math]::Round(((Get-Date) - $verifyStartTime).TotalSeconds, 1)
-                Write-StepStatus "" "Info" "Permissions applied but verification incomplete (${verifyElapsed}s)"
+                Write-StepStatus "" "Info" "Permissions granted but verification pattern incomplete (${verifyElapsed}s)"
             }
         } else {
             $verifyElapsed = [math]::Round(((Get-Date) - $verifyStartTime).TotalSeconds, 1)
-            Write-StepStatus "" "Info" "Permission verification query failed, but grants succeeded (${verifyElapsed}s)"
+            Write-StepStatus "" "Info" "Verification query failed, but grants succeeded (${verifyElapsed}s)"
         }
     } catch {
         Write-StepStatus "" "Info" "Permission verification skipped: $($_.Exception.Message)"
     }
     
     $restartStartTime = Get-Date
-    Write-StepStatus "Restarting container to activate managed identity" "Started" "10s"
+    Write-StepStatus "Restarting container to activate managed identity" "Started" "5s"
     
     $revisionNameArgs = @('containerapp', 'revision', 'list', '--name', $container, '--resource-group', $rg, '--query', '[0].name', '--output', 'tsv')
     $revisionNameResult = Invoke-AzCli -Arguments $revisionNameArgs
@@ -1139,10 +1138,11 @@ WHERE dp.name = '$escapedUserName';
     $maxWaitMinutes = 5
     $checkDeadline = (Get-Date).AddMinutes($maxWaitMinutes)
     $checkAttempt = 0
+    $verifyStartTime = Get-Date
     
     while (-not $containerRunning -and (Get-Date) -lt $checkDeadline) {
         $checkAttempt++
-        Wait-Seconds 10 "Container status check"
+        Start-Sleep -Seconds 10
         
         $statusArgs = @('containerapp', 'show', '--name', $container, '--resource-group', $rg, '--query', '{provisioning:properties.provisioningState,running:properties.runningStatus}', '--output', 'json')
         $statusResult = Invoke-AzCli -Arguments $statusArgs
@@ -1169,7 +1169,8 @@ WHERE dp.name = '$escapedUserName';
                     
                         if ($restartCount -lt 3) {
                             $containerRunning = $true
-                            Write-StepStatus "" "Success" "$container running (restart count: $restartCount)"
+                            $verifyElapsed = [math]::Round(((Get-Date) - $verifyStartTime).TotalSeconds, 1)
+                            Write-StepStatus "" "Success" "$container running with restart count $restartCount (${verifyElapsed}s)"
                         } else {
                             Write-StepStatus "" "Info" "Container in crash loop (restart count: $restartCount)"
                         }
@@ -1189,10 +1190,20 @@ WHERE dp.name = '$escapedUserName';
     $containerShowArgs = @('containerapp', 'show', '--name', $container, '--resource-group', $rg, '--query', 'properties.configuration.ingress.fqdn', '--output', 'tsv')
     $containerShowResult = Invoke-AzCli -Arguments $containerShowArgs
     if ($containerShowResult.ExitCode -eq 0 -and -not [string]::IsNullOrWhiteSpace($containerShowResult.TrimmedText)) {
-        $containerUrl = "https://$($containerShowResult.TrimmedText)"
+        # Remove WARNING lines from Azure CLI containerapp extension before constructing URL
+        $cleanFqdn = ($containerShowResult.TrimmedText -split "`n" | Where-Object { $_ -notmatch '^WARNING:' }) -join ''
+        $cleanFqdn = $cleanFqdn.Trim()
+        $containerUrl = "https://$cleanFqdn"
         
-        Write-StepStatus "Checking DAB API health endpoint" "Started" "1min"
-        $healthAttempts = 5
+        Write-StepStatus "Checking DAB API health endpoint" "Started" "2min"
+        $healthCheckStartTime = Get-Date
+        
+        # Give container time to stabilize after restart
+        Write-Host "  Waiting 15s for container to stabilize..." -ForegroundColor Gray
+        Start-Sleep -Seconds 15
+        
+        $healthAttempts = 10
+        $waitBetweenRetries = 15
         $healthCheckPassed = $false
         
         for ($healthRetry = 1; $healthRetry -le $healthAttempts; $healthRetry++) {
@@ -1201,34 +1212,40 @@ WHERE dp.name = '$escapedUserName';
                 $healthResponse = Invoke-RestMethod -Uri $healthUrl -TimeoutSec 10 -ErrorAction Stop
                 
                 if ($healthResponse.status -eq "Healthy") {
-                    Write-StepStatus "" "Success" "DAB API health: Healthy"
+                    $healthElapsed = [math]::Round(((Get-Date) - $healthCheckStartTime).TotalSeconds, 1)
+                    Write-StepStatus "" "Success" "DAB API health: Healthy (${healthElapsed}s)"
                     $healthCheckPassed = $true
                     break
                 } elseif ($healthResponse.status -eq "Unhealthy") {
                     $dbCheck = $healthResponse.checks | Where-Object { $_.tags -contains "data-source" } | Select-Object -First 1
                     if ($dbCheck -and $dbCheck.status -eq "Healthy") {
-                        Write-StepStatus "" "Info" "DAB API responding (database connection healthy)"
+                        $healthElapsed = [math]::Round(((Get-Date) - $healthCheckStartTime).TotalSeconds, 1)
+                        Write-StepStatus "" "Success" "DAB API responding, database connection healthy (${healthElapsed}s)"
                         $healthCheckPassed = $true
                         break
                     } else {
                         if ($healthRetry -lt $healthAttempts) {
-                            Write-StepStatus "" "Retrying" "health check: $($healthResponse.status), retry $healthRetry/$healthAttempts"
-                            Start-Sleep -Seconds 10
+                            Write-StepStatus "" "Retrying" "health status: $($healthResponse.status), attempt $healthRetry/$healthAttempts, waiting ${waitBetweenRetries}s"
+                            Start-Sleep -Seconds $waitBetweenRetries
                         } else {
-                            Write-StepStatus "" "Info" "health check: $($healthResponse.status) - database may need verification"
+                            Write-StepStatus "" "Info" "health status: $($healthResponse.status) after $healthAttempts attempts - database may need verification"
                         }
                     }
                 } else {
                     if ($healthRetry -lt $healthAttempts) {
-                        Start-Sleep -Seconds 10
+                        Write-StepStatus "" "Retrying" "health status: $($healthResponse.status), attempt $healthRetry/$healthAttempts, waiting ${waitBetweenRetries}s"
+                        Start-Sleep -Seconds $waitBetweenRetries
                     }
                 }
             } catch {
                 if ($healthRetry -lt $healthAttempts) {
-                    Start-Sleep -Seconds 10
+                    Write-StepStatus "" "Retrying" "unable to reach health endpoint, attempt $healthRetry/$healthAttempts, waiting ${waitBetweenRetries}s"
+                    Start-Sleep -Seconds $waitBetweenRetries
                 } else {
-                    Write-StepStatus "" "Info" "Unable to verify DAB API health (may still be starting)"
+                    $healthElapsed = [math]::Round(((Get-Date) - $healthCheckStartTime).TotalSeconds, 1)
+                    Write-StepStatus "" "Info" "Unable to verify DAB API health after $healthAttempts attempts (${healthElapsed}s)"
                     Write-Host "  Health endpoint: $healthUrl" -ForegroundColor DarkGray
+                    Write-Host "  Container may still be starting - check logs if needed" -ForegroundColor DarkGray
                 }
             }
         }

@@ -65,6 +65,16 @@ DAB configuration file **must** reference the connection string as:
 ### `Dockerfile`
 (Provided) Builds a custom image with your config baked in. 
 
+## Features
+
+- Entra ID-only authentication (no SQL passwords)
+- Managed identity for database and container registry access
+- Automatic SQL permissions: db_datareader, db_datawriter, and EXECUTE (for stored procedures)
+- Permission verification to ensure managed identity has all required SQL access
+- Custom Docker image with config baked in (no secrets in environment variables)
+- Free-tier database with automatic fallback to paid tier if unavailable
+- Failed deployments auto-cleanup (or preserve with `-NoCleanup` for debugging)
+
 ## Example Output
 
 ```sh
@@ -101,10 +111,6 @@ Getting current Azure AD user
 Creating SQL Server
 [Started] (est 80s at 14:32:47)
 [Success] (sql-server-20251107143022, 78.4s)
-
-Verifying Entra ID authentication
-[Started] (est 3min at 14:33:05)
-[Success] (active)
 
 Creating SQL database
 [Started] (est 15s at 14:33:20)
@@ -147,19 +153,23 @@ Retrieving managed identity display name
 [Success] (Retrieved: data-api-container)
 
 Granting managed identity access to SQL Database
-[Started] (est 90s at 14:44:38)
+[Started] (est 10s at 14:44:38)
 [Success] (data-api-container granted access to sql-database, 45.2s)
 
+Verifying SQL permissions
+[Started] (est 3s at 14:45:23)
+[Success] (Permissions verified: db_datareader, db_datawriter, EXECUTE, 2.1s)
+
 Restarting container to activate managed identity
-[Started] (est 15s at 14:44:53)
+[Started] (est 15s at 14:45:26)
 [Success] (data-api-container restarted, 12.4s)
 
 Verifying container is running
-[Started] (est 5min at 14:49:53)
+[Started] (est 5min at 14:45:38)
 [Success] (data-api-container running, restart count: 0)
 
 Checking DAB API health endpoint
-[Started] (est 1min at 14:50:53)
+[Started] (est 1min at 14:50:38)
 [Success] (DAB API health: Healthy)
 
 ==============================================================================
@@ -191,49 +201,3 @@ ENDPOINTS
   Logs (CLI):       az containerapp logs show -n data-api-container -g dab-demo-20251106143022 --follow
 ```
 
-## Features
-
-- Entra ID-only authentication (no SQL passwords)
-- Managed identity for database and container registry access
-- Custom Docker image with config baked in (no secrets in environment variables)
-- Free-tier database with automatic fallback to paid tier if unavailable
-- Failed deployments auto-cleanup (or preserve with `-NoCleanup` for debugging)
-
-## Parameters (all are optional)
-
-### `-Region` (string)
-Azure region for deployment. Default: `westus2`
-
-Supported regions validated at startup.
-
-```powershell
-.\script.ps1 -Region eastus
-```
-
-### `-Force` (switch)
-Skips subscription confirmation prompt. Useful for CI/CD pipelines and automation.
-
-```powershell
-.\script.ps1 -Force
-```
-
-### `-DatabasePath` (string)
-Path to SQL database file. Default: `./database.sql`
-
-```powershell
-.\script.ps1 -DatabasePath "C:\databases\prod.sql"
-```
-
-### `-ConfigPath` (string)
-Path to DAB configuration file. Default: `./dab-config.json`
-
-```powershell
-.\script.ps1 -ConfigPath "C:\configs\prod-config.json"
-```
-
-### `-NoCleanup` (switch)
-Preserves resource group on deployment failure for debugging. Default behavior deletes failed deployments automatically.
-
-```powershell
-.\script.ps1 -NoCleanup
-```
