@@ -46,7 +46,7 @@ param(
     [switch]$SkipVersionCheck
 )
 
-$Version = "0.2.0"
+$Version = "0.2.1"
 
 Set-StrictMode -Version Latest
 
@@ -97,7 +97,8 @@ function Test-ScriptVersion {
         [Parameter(Mandatory)]
         [string]$CurrentVersion,
         
-        [string]$Repository = "JerryNixon/dab-demo-environment-script"
+        [string]$Repository = "JerryNixon/dab-demo-environment-script",
+        [string]$ScriptFile = "script.ps1"
     )
     
     try {
@@ -126,7 +127,8 @@ function Test-ScriptVersion {
             Write-Host "NOTE: A newer version is available!" -ForegroundColor Yellow
             Write-Host "  Current: $CurrentVersion" -ForegroundColor White
             Write-Host "  Latest:  $latestVersion" -ForegroundColor Green
-            Write-Host "  URL:     $($response.html_url)" -ForegroundColor Cyan
+            Write-Host "  Release: $($response.html_url)" -ForegroundColor Cyan
+            Write-Host "  Script:  https://github.com/$Repository/blob/main/$ScriptFile" -ForegroundColor Cyan
             Write-Host ""
             Write-Host "To skip this check: -SkipVersionCheck" -ForegroundColor DarkGray
             Write-Host ""
@@ -140,7 +142,8 @@ function Test-ScriptVersion {
             Write-Host "  - The version number in the script is incorrect" -ForegroundColor White
             Write-Host "  - GitHub releases are out of sync" -ForegroundColor White
             Write-Host ""
-            Write-Host "Latest release: $($response.html_url)" -ForegroundColor Cyan
+            Write-Host "Release: $($response.html_url)" -ForegroundColor Cyan
+            Write-Host "Script:  https://github.com/$Repository/blob/main/$ScriptFile" -ForegroundColor Cyan
             Write-Host ""
             Write-Host "To proceed anyway, use: -SkipVersionCheck" -ForegroundColor Yellow
             Write-Host ""
