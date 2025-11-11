@@ -4,6 +4,8 @@ Automated deployment of **Data API Builder (DAB)** on **Azure Container Apps (AC
 
 ## Quick Start
 
+### Initial Deployment
+
 Ensure these files are in your working directory:
 
 * `database.sql` - Your database schema
@@ -15,6 +17,17 @@ Then run:
 ```powershell
 .\script.ps1
 ```
+
+### Update Existing Deployment
+
+After modifying `dab-config.json`, update just the container image without redeploying infrastructure:
+
+```powershell
+.\script.ps1 -UpdateImage dab-demo-20251111113005
+```
+
+> **Fast Updates**: ~3 minutes vs ~8 minutes for full deployment  
+> **Safe**: Only updates container image, doesn't touch database or other infrastructure
 
 > Requires PowerShell 7+, Azure CLI, DAB CLI, and sqlcmd.
 
@@ -67,6 +80,7 @@ DAB configuration file **must** reference the connection string as:
 
 ## Features
 
+- **Fast updates**: Update container image in ~3 minutes with `-UpdateImage`
 - Entra ID-only authentication (no SQL passwords)
 - Managed identity for database and container registry access
 - Automatic SQL permissions: db_datareader, db_datawriter, and EXECUTE (for stored procedures)
@@ -74,6 +88,45 @@ DAB configuration file **must** reference the connection string as:
 - Custom Docker image with config baked in (no secrets in environment variables)
 - Free-tier database with automatic fallback to paid tier if unavailable
 - Failed deployments auto-cleanup (or preserve with `-NoCleanup` for debugging)
+
+## Updating Your Deployment
+
+After making changes to `dab-config.json`, you can update just the container image without redeploying the entire infrastructure:
+
+```powershell
+# Update with default config location
+.\script.ps1 -UpdateImage dab-demo-20251111113005
+
+# Update with custom config location
+.\script.ps1 -UpdateImage dab-demo-20251111113005 -ConfigPath .\configs\prod.json
+
+# Skip confirmation prompt
+.\script.ps1 -UpdateImage dab-demo-20251111113005 -Force
+```
+
+### How It Works
+
+1. **Discovers existing resources** using tags (`author=dab-deploy-demo-script`)
+2. **Generates config hash** to identify the new configuration
+3. **Checks for existing image** - reuses if config hasn't changed
+4. **Builds new image** with updated config in Azure Container Registry
+5. **Updates container app** with new image tag
+6. **Waits for rollout** - Azure Container Apps handles the rolling update
+7. **Verifies health** - confirms new revision is responding
+
+**What gets updated:**
+- Container image with new DAB configuration
+
+**What stays unchanged:**
+- SQL Server and database
+- Container Apps environment
+- Azure Container Registry
+- Log Analytics workspace
+- All managed identities and permissions
+
+**Time comparison:**
+- Full deployment: ~8 minutes
+- Image update: ~3 minutes
 
 ## Example Output
 
@@ -199,5 +252,64 @@ ENDPOINTS
   Portal Container: https://portal.azure.com/...
   Portal Logs:      https://portal.azure.com/...
   Logs (CLI):       az containerapp logs show -n data-api-container -g dab-demo-20251106143022 --follow
+```
+
+## Script Parameters
+
+### Deployment Mode
+
+```powershell
+.\script.ps1 [options]
+```
+
+| Parameter | Description | Default |
+|-----------|-------------|---------|
+| `-Region` | Azure region for deployment | `westus2` |
+| `-DatabasePath` | Path to SQL database file | `./database.sql` |
+| `-ConfigPath` | Path to DAB config file | `./dab-config.json` |
+| `-Force` | Skip subscription confirmation | `false` |
+| `-NoCleanup` | Preserve resources on failure (for debugging) | `false` |
+| `-VerifyAdOnlyAuth` | Verify Azure AD-only auth is active (adds ~3min) | `false` |
+
+**Examples:**
+```powershell
+# Default deployment
+.\script.ps1
+
+# Custom region
+.\script.ps1 -Region eastus
+
+# Custom paths
+.\script.ps1 -DatabasePath .\db\schema.sql -ConfigPath .\config\prod.json
+
+# Skip confirmation (for CI/CD)
+.\script.ps1 -Force
+
+# Keep resources on failure
+.\script.ps1 -NoCleanup
+```
+
+### Update Mode
+
+```powershell
+.\script.ps1 -UpdateImage <resource-group-name> [options]
+```
+
+| Parameter | Description | Default |
+|-----------|-------------|---------|
+| `-UpdateImage` | Resource group name of existing deployment | Required |
+| `-ConfigPath` | Path to updated DAB config file | `./dab-config.json` |
+| `-Force` | Skip subscription confirmation | `false` |
+
+**Examples:**
+```powershell
+# Update with default config
+.\script.ps1 -UpdateImage dab-demo-20251111113005
+
+# Update with custom config
+.\script.ps1 -UpdateImage dab-demo-20251111113005 -ConfigPath .\config\prod-v2.json
+
+# Skip confirmation
+.\script.ps1 -UpdateImage dab-demo-20251111113005 -Force
 ```
 

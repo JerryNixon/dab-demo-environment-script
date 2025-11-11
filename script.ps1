@@ -7,6 +7,7 @@
 #   -Force: Skip subscription confirmation prompt (useful for CI/CD automation)
 #   -NoCleanup: Preserve resource group on failure for debugging (default: auto-cleanup)
 #   -VerifyAdOnlyAuth: Verify Azure AD-only authentication is active (adds ~3min wait, optional)
+#   -UpdateImage: Update existing deployment with new DAB config (specify resource group name)
 #
 # Notes:
 #   The script builds a custom Docker image with dab-config.json baked in using Azure Container Registry.
@@ -19,14 +20,27 @@
 #   .\script.ps1 -Force      # Skip confirmation prompts
 #   .\script.ps1 -NoCleanup  # Keep resources on failure for debugging
 #   .\script.ps1 -VerifyAdOnlyAuth  # Verify AD-only auth propagation (slower but more thorough)
+#   .\script.ps1 -UpdateImage dab-demo-20251111113005  # Update existing deployment
 #
 param(
+    [Parameter(ParameterSetName='Deploy')]
     [string]$Region = "westus2",
+    
+    [Parameter(ParameterSetName='Deploy')]
     [string]$DatabasePath = "./database.sql",
+    
     [string]$ConfigPath = "./dab-config.json",
+    
     [switch]$Force,
+    
+    [Parameter(ParameterSetName='Deploy')]
     [switch]$NoCleanup,
-    [switch]$VerifyAdOnlyAuth
+    
+    [Parameter(ParameterSetName='Deploy')]
+    [switch]$VerifyAdOnlyAuth,
+    
+    [Parameter(ParameterSetName='UpdateImage', Mandatory)]
+    [string]$UpdateImage
 )
 
 $Version = "0.1.2"
@@ -164,28 +178,32 @@ if (-not (Get-Command sqlcmd -ErrorAction SilentlyContinue)) {
     }
 }
 
-if (-not (Test-Path $DatabasePath)) {
+# Database validation (Deploy mode only)
+if ($PSCmdlet.ParameterSetName -eq 'Deploy') {
+    if (-not (Test-Path $DatabasePath)) {
+        Write-Host "  database.sql: " -NoNewline -ForegroundColor Yellow
+        Write-Host "Not found" -ForegroundColor Red
+        Write-Host ""
+        Write-Host "ERROR: database.sql not found at: $DatabasePath" -ForegroundColor Red
+        Write-Host "Please create a database.sql file with your database schema and try again." -ForegroundColor Yellow
+        Write-Host "Or specify a custom path: -DatabasePath <path>" -ForegroundColor Cyan
+        throw "database.sql not found at: $DatabasePath"
+    }
+
+    $databaseContent = Get-Content $DatabasePath -Raw -ErrorAction SilentlyContinue
+    if ([string]::IsNullOrWhiteSpace($databaseContent)) {
+        Write-Host "  database.sql: " -NoNewline -ForegroundColor Yellow
+        Write-Host "Empty file" -ForegroundColor Red
+        Write-Host ""
+        Write-Host "ERROR: database.sql is empty at: $DatabasePath" -ForegroundColor Red
+        Write-Host "The database script file is empty. Please add SQL commands to create your database." -ForegroundColor Yellow
+        throw "database.sql is empty"
+    }
     Write-Host "  database.sql: " -NoNewline -ForegroundColor Yellow
-    Write-Host "Not found" -ForegroundColor Red
-    Write-Host ""
-    Write-Host "ERROR: database.sql not found at: $DatabasePath" -ForegroundColor Red
-    Write-Host "Please create a database.sql file with your database schema and try again." -ForegroundColor Yellow
-    Write-Host "Or specify a custom path: -DatabasePath <path>" -ForegroundColor Cyan
-    throw "database.sql not found at: $DatabasePath"
+    Write-Host "Found" -ForegroundColor Green
 }
 
-$databaseContent = Get-Content $DatabasePath -Raw -ErrorAction SilentlyContinue
-if ([string]::IsNullOrWhiteSpace($databaseContent)) {
-    Write-Host "  database.sql: " -NoNewline -ForegroundColor Yellow
-    Write-Host "Empty file" -ForegroundColor Red
-    Write-Host ""
-    Write-Host "ERROR: database.sql is empty at: $DatabasePath" -ForegroundColor Red
-    Write-Host "The database script file is empty. Please add SQL commands to create your database." -ForegroundColor Yellow
-    throw "database.sql is empty"
-}
-Write-Host "  database.sql: " -NoNewline -ForegroundColor Yellow
-Write-Host "Found" -ForegroundColor Green
-
+# DAB config validation (both modes)
 if (-not (Test-Path $ConfigPath)) {
     Write-Host "  dab-config.json: " -NoNewline -ForegroundColor Yellow
     Write-Host "Not found" -ForegroundColor Red
@@ -580,6 +598,236 @@ if (-not $Force) {
 try {
     [void](Test-AzureTokenExpiry -ExpiryBufferMinutes 5)
     
+    # Detect parameter set mode
+    if ($PSCmdlet.ParameterSetName -eq 'UpdateImage') {
+        # ============================================================================
+        # UPDATE IMAGE MODE
+        # ============================================================================
+        $updateStartTime = Get-Date
+        $rg = $UpdateImage
+        
+        Write-Host "`n================================================================================" -ForegroundColor Cyan
+        Write-Host "  UPDATE IMAGE MODE" -ForegroundColor Cyan
+        Write-Host "================================================================================" -ForegroundColor Cyan
+        Write-Host "  Resource Group: $rg" -ForegroundColor White
+        Write-Host "  Config File:    $ConfigPath" -ForegroundColor White
+        Write-Host ""
+        
+        # Subscription confirmation (same as Deploy mode)
+        if (-not $Force) {
+            $confirm = Read-Host "`nUpdate resources in this subscription? (y/n/list) [y]"
+            if ($confirm) { $confirm = $confirm.Trim().ToLowerInvariant() }
+
+            if ($confirm -eq 'list' -or $confirm -eq 'l') {
+                Write-Host "`nAvailable subscriptions:" -ForegroundColor Cyan
+                $subscriptionListResult = Invoke-AzCli -Arguments @('account', 'list', '--query', '[].{name:name, id:id, isDefault:isDefault}', '--output', 'json')
+                OK $subscriptionListResult "Failed to list subscriptions"
+                $subscriptions = $subscriptionListResult.TrimmedText | ConvertFrom-Json
+                
+                for ($i = 0; $i -lt $subscriptions.Count; $i++) {
+                    $sub = $subscriptions[$i]
+                    $marker = if ($sub.isDefault) { " (current)" } else { "" }
+                    $color = if ($sub.isDefault) { "Green" } else { "White" }
+                    Write-Host "$($i + 1). $($sub.name)$marker" -ForegroundColor $color
+                    Write-Host "   ID: $($sub.id)" -ForegroundColor DarkGray
+                }
+                
+                do {
+                    $choice = Read-Host "`nSelect subscription (1-$($subscriptions.Count)) or press Enter to keep current"
+                    if ([string]::IsNullOrWhiteSpace($choice)) { 
+                        break 
+                    }
+                } while ($choice -notmatch '^\d+$' -or [int]$choice -lt 1 -or [int]$choice -gt $subscriptions.Count)
+                
+                if (-not [string]::IsNullOrWhiteSpace($choice)) {
+                    $selectedSub = $subscriptions[[int]$choice - 1]
+                    Write-Host "Switching to subscription: $($selectedSub.name)" -ForegroundColor Yellow
+                    $setSubscriptionResult = Invoke-AzCli -Arguments @('account', 'set', '--subscription', $selectedSub.id)
+                    OK $setSubscriptionResult "Failed to switch subscription"
+                    $accountInfoResult = Invoke-AzCli -Arguments @('account', 'show', '--output', 'json')
+                    OK $accountInfoResult "Failed to refresh subscription context"
+                    $accountInfo = $accountInfoResult.TrimmedText | ConvertFrom-Json
+                    $currentSub = $accountInfo.name
+                    $currentSubId = $accountInfo.id
+                    Write-Host "Now using: $currentSub" -ForegroundColor Green
+                }
+            } elseif ($confirm -and $confirm -ne 'y') {
+                Write-Host "Update cancelled by user" -ForegroundColor Yellow
+                exit 0
+            }
+            
+            $estimatedFinishTime = (Get-Date).AddMinutes(3).ToString("HH:mm:ss")
+            Write-Host "`nStarting image update. Estimated time to complete: 3m (finish ~$estimatedFinishTime)" -ForegroundColor Cyan
+        } else {
+            Write-Host "  -Force specified: skipping confirmation" -ForegroundColor Yellow
+            $estimatedFinishTime = (Get-Date).AddMinutes(3).ToString("HH:mm:ss")
+            Write-Host "`nStarting image update. Estimated time to complete: 3m (finish ~$estimatedFinishTime)" -ForegroundColor Cyan
+        }
+        
+        # Verify resource group exists
+        Write-StepStatus "Verifying resource group" "Started" "5s"
+        $rgCheckResult = Invoke-AzCli -Arguments @('group', 'exists', '--name', $rg)
+        if ($rgCheckResult.TrimmedText -ne 'true') {
+            throw "Resource group '$rg' does not exist. Cannot update."
+        }
+        Write-StepStatus "" "Success" "Resource group exists"
+        
+        # Discover existing resources
+        Write-StepStatus "Discovering existing resources" "Started" "5s"
+        
+        # Find ACR
+        $acrListResult = Invoke-AzCli -Arguments @('acr', 'list', '--resource-group', $rg, '--query', "[?tags.author=='dab-deploy-demo-script'].name", '--output', 'tsv')
+        if ([string]::IsNullOrWhiteSpace($acrListResult.TrimmedText)) {
+            throw "No ACR found in resource group '$rg' with expected tags (author=dab-deploy-demo-script)"
+        }
+        $acrName = $acrListResult.TrimmedText.Trim()
+        Write-Host "  Found ACR: $acrName" -ForegroundColor Gray
+        
+        # Get ACR login server
+        $acrLoginServerResult = Invoke-AzCli -Arguments @('acr', 'show', '--name', $acrName, '--resource-group', $rg, '--query', 'loginServer', '--output', 'tsv')
+        OK $acrLoginServerResult "Failed to get ACR login server"
+        $acrLoginServer = $acrLoginServerResult.TrimmedText
+        
+        # Find Container App
+        $containerListResult = Invoke-AzCli -Arguments @('containerapp', 'list', '--resource-group', $rg, '--query', "[?tags.author=='dab-deploy-demo-script'].name", '--output', 'tsv')
+        if ([string]::IsNullOrWhiteSpace($containerListResult.TrimmedText)) {
+            throw "No Container App found in resource group '$rg' with expected tags (author=dab-deploy-demo-script)"
+        }
+        $container = $containerListResult.TrimmedText.Trim()
+        Write-Host "  Found Container App: $container" -ForegroundColor Gray
+        
+        Write-StepStatus "" "Success" "Resources discovered"
+        
+        # Generate config hash
+        $configHash = (Get-FileHash $ConfigPath -Algorithm SHA256).Hash.Substring(0,8).ToLower()
+        Write-Host "  New config hash: $configHash" -ForegroundColor Gray
+        
+        # Check if image with same hash already exists
+        $imageTag = "$acrLoginServer/dab-baked:$configHash"
+        $existingTagsResult = Invoke-AzCli -Arguments @('acr', 'repository', 'show-tags', '--name', $acrName, '--repository', 'dab-baked', '--output', 'json')
+        if ($existingTagsResult.ExitCode -eq 0) {
+            $existingTags = $existingTagsResult.TrimmedText | ConvertFrom-Json
+            if ($existingTags -contains $configHash) {
+                Write-Host "`n  Image with this config already exists in ACR" -ForegroundColor Yellow
+                $response = Read-Host "  Continue with existing image? (y/n) [y]"
+                if ($response -and $response -ne 'y') {
+                    Write-Host "`nUpdate cancelled by user." -ForegroundColor Yellow
+                    exit 0
+                }
+            }
+        }
+        
+        # Build new image
+        Write-StepStatus "Building updated DAB image" "Started" "40s"
+        $buildStartTime = Get-Date
+        
+        $buildArgs = @('acr', 'build', '--resource-group', $rg, '--registry', $acrName, '--image', $imageTag, '--file', 'Dockerfile', '.')
+        $buildResult = Invoke-AzCli -Arguments $buildArgs
+        OK $buildResult "Failed to build updated DAB image"
+        
+        $buildElapsed = [math]::Round(((Get-Date) - $buildStartTime).TotalSeconds, 1)
+        Write-StepStatus "" "Success" "$imageTag (${buildElapsed}s)"
+        
+        # Update container app
+        Write-StepStatus "Updating container app with new image" "Started" "30s"
+        $updateAppStartTime = Get-Date
+        
+        $updateArgs = @(
+            'containerapp', 'update',
+            '--name', $container,
+            '--resource-group', $rg,
+            '--image', $imageTag
+        )
+        
+        $updateResult = Invoke-AzCli -Arguments $updateArgs
+        OK $updateResult "Failed to update container app"
+        
+        $updateElapsed = [math]::Round(((Get-Date) - $updateAppStartTime).TotalSeconds, 1)
+        Write-StepStatus "" "Success" "Container updated (${updateElapsed}s)"
+        
+        # Wait for new revision to become ready
+        Write-StepStatus "Waiting for new revision to become ready" "Started" "2min"
+        
+        $maxWaitMinutes = 2
+        $checkDeadline = (Get-Date).AddMinutes($maxWaitMinutes)
+        $revisionReady = $false
+        
+        while (-not $revisionReady -and (Get-Date) -lt $checkDeadline) {
+            Start-Sleep -Seconds 10
+            
+            $statusArgs = @('containerapp', 'show', '--name', $container, '--resource-group', $rg, '--query', '{running:properties.runningStatus,revision:properties.latestReadyRevisionName}', '--output', 'json')
+            $statusResult = Invoke-AzCli -Arguments $statusArgs
+            
+            if ($statusResult.ExitCode -eq 0) {
+                $cleanedJson = $statusResult.TrimmedText -replace '(?m)^WARNING:.*$', ''
+                $status = $cleanedJson.Trim() | ConvertFrom-Json
+                
+                if ($status.running -eq 'Running') {
+                    $revisionReady = $true
+                    Write-StepStatus "" "Success" "New revision ready: $($status.revision)"
+                }
+            }
+        }
+        
+        if (-not $revisionReady) {
+            throw "New revision did not become ready within $maxWaitMinutes minutes"
+        }
+        
+        # Get container URL
+        $fqdnResult = Invoke-AzCli -Arguments @('containerapp', 'show', '--name', $container, '--resource-group', $rg, '--query', 'properties.configuration.ingress.fqdn', '--output', 'tsv')
+        $cleanFqdn = ($fqdnResult.TrimmedText -split "`n" | Where-Object { $_ -notmatch '^WARNING:' }) -join ''
+        $containerUrl = "https://$($cleanFqdn.Trim())"
+        
+        # Health check
+        Write-StepStatus "Verifying DAB API health" "Started" "30s"
+        $healthCheckStartTime = Get-Date
+        $healthCheckPassed = $false
+        
+        for ($i = 1; $i -le 5; $i++) {
+            try {
+                $healthResponse = Invoke-RestMethod -Uri "$containerUrl/health" -TimeoutSec 10 -ErrorAction Stop
+                if ($healthResponse.status -eq "Healthy") {
+                    $healthElapsed = [math]::Round(((Get-Date) - $healthCheckStartTime).TotalSeconds, 1)
+                    Write-StepStatus "" "Success" "API is healthy (${healthElapsed}s)"
+                    $healthCheckPassed = $true
+                    break
+                }
+            } catch {
+                if ($i -lt 5) {
+                    Start-Sleep -Seconds 10
+                } else {
+                    Write-Host "  Warning: Health check failed after 5 attempts" -ForegroundColor Yellow
+                    Write-Host "  The container may still be starting up" -ForegroundColor Yellow
+                }
+            }
+        }
+        
+        # Summary
+        $totalTime = [math]::Round(((Get-Date) - $updateStartTime).TotalMinutes, 1)
+        
+        Write-Host "`n================================================================================" -ForegroundColor Green
+        Write-Host "  ✓ IMAGE UPDATE SUCCESSFUL" -ForegroundColor Green
+        Write-Host "================================================================================" -ForegroundColor Green
+        Write-Host ""
+        Write-Host "UPDATED RESOURCES" -ForegroundColor Cyan
+        Write-Host "  Resource Group:    $rg" -ForegroundColor White
+        Write-Host "  Container App:     $container" -ForegroundColor White
+        Write-Host "  New Image:         $imageTag" -ForegroundColor White
+        Write-Host "  API Endpoint:      $containerUrl" -ForegroundColor White
+        Write-Host ""
+        Write-Host "UPDATE INFO" -ForegroundColor Magenta
+        Write-Host "  Total time:        ${totalTime}m" -ForegroundColor White
+        Write-Host "  Config hash:       $configHash" -ForegroundColor White
+        Write-Host "  Health check:      $(if ($healthCheckPassed) { 'Passed' } else { 'Skipped' })" -ForegroundColor White
+        Write-Host ""
+        Write-Host "================================================================================" -ForegroundColor Green
+        
+        exit 0
+    }
+    
+    # ============================================================================
+    # DEPLOY MODE (original logic)
+    # ============================================================================
     $rg = "dab-demo-$runTimestamp"
     $acaEnv = "aca-environment"
     $container = "data-api-container"
