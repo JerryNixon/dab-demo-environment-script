@@ -45,19 +45,20 @@ Resource Group: dab-demo-<timestamp>
 
 ### Resource tags
 
-All resources are automatically tagged. 
+All resources are automatically tagged:
 
  - `author=dab-deploy-demo-script`
- - `version=<script-version>`
  - `owner=<your-username>`
 
 ## Prerequisites
 
-* **PowerShell 7+** (not Windows PowerShell 5.1)
+* **PowerShell 5.1 or higher** (PowerShell 7+ recommended for best experience)
 * **Azure CLI** - [Install](https://aka.ms/installazurecliwindows)
 * **DAB CLI** - Required for configuration validation
 * **sqlcmd** - Auto-installed via winget if available
 * **Contributor** or **Owner** role on target subscription
+
+> **Note**: The script is compatible with both PowerShell 5.1 and PowerShell 7+. However, PowerShell 7+ is recommended for improved performance and features.
 
 ## Three required external files
 
