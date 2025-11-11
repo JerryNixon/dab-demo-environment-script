@@ -451,60 +451,6 @@ function Write-StepStatus {
     }
 }
 
-function OK { param($r, $msg) if($r.ExitCode -ne 0) { throw "$msg`n$($r.Text)" } }
-
-function Test-ScriptVersion {
-    param(
-        [Parameter(Mandatory)]
-        [string]$CurrentVersion,
-        
-        [string]$Repository = "JerryNixon/dab-demo-environment-script"
-    )
-    
-    try {
-        $response = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repository/releases/latest" -TimeoutSec 5 -ErrorAction Stop
-        $latestVersion = $response.tag_name -replace '^v', ''
-        
-        # Parse versions for comparison
-        $current = [version]$CurrentVersion
-        $latest = [version]$latestVersion
-        
-        if ($current -lt $latest) {
-            # Local version is OLDER - show info but continue
-            Write-Host ""
-            Write-Host "NOTE: A newer version is available!" -ForegroundColor Yellow
-            Write-Host "  Current: $CurrentVersion" -ForegroundColor White
-            Write-Host "  Latest:  $latestVersion" -ForegroundColor Green
-            Write-Host "  URL:     $($response.html_url)" -ForegroundColor Cyan
-            Write-Host ""
-            Write-Host "To skip this check: -SkipVersionCheck" -ForegroundColor DarkGray
-            Write-Host ""
-        } elseif ($current -gt $latest) {
-            # Local version is NEWER - this is suspicious, block execution
-            Write-Host ""
-            Write-Host "WARNING: Your script version ($CurrentVersion) is NEWER than the latest release ($latestVersion)" -ForegroundColor Red
-            Write-Host ""
-            Write-Host "This usually means:" -ForegroundColor Yellow
-            Write-Host "  - You're running an unreleased development version" -ForegroundColor White
-            Write-Host "  - The version number in the script is incorrect" -ForegroundColor White
-            Write-Host "  - GitHub releases are out of sync" -ForegroundColor White
-            Write-Host ""
-            Write-Host "Latest release: $($response.html_url)" -ForegroundColor Cyan
-            Write-Host ""
-            Write-Host "To proceed anyway, use: -SkipVersionCheck" -ForegroundColor Yellow
-            Write-Host ""
-            throw "Script version ($CurrentVersion) is newer than latest release ($latestVersion). Use -SkipVersionCheck to bypass."
-        }
-        # If equal, silently continue (versions match)
-    } catch [System.Management.Automation.RuntimeException] {
-        # Re-throw our intentional version mismatch error
-        throw
-    } catch {
-        # Silent fail for network issues - don't block deployment if GitHub is unreachable
-        Write-Verbose "Version check skipped: $($_.Exception.Message)"
-    }
-}
-
 function Test-AzureTokenExpiry {
     param(
         [int]$ExpiryBufferMinutes = 5
