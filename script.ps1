@@ -29,7 +29,7 @@ param(
     [switch]$VerifyAdOnlyAuth
 )
 
-$Version = "0.0.1"
+$Version = "0.1.2"
 
 Set-StrictMode -Version Latest
 
@@ -595,7 +595,7 @@ try {
     $sqlDb = Assert-ResourceNameLength -Name $sqlDb -ResourceType 'Database'
     $logAnalytics = Assert-ResourceNameLength -Name $logAnalytics -ResourceType 'LogAnalytics'
 
-    Write-StepStatus "Creating resource group" "Started" "3s"
+    Write-StepStatus "Creating resource group" "Started" "5s"
     $rgStartTime = Get-Date
     $rgArgs = @('group', 'create', '--name', $rg, '--location', $Region, '--tags') + $commonTagValues
     $rgCreateResult = Invoke-AzCli -Arguments $rgArgs
@@ -620,7 +620,7 @@ try {
     $rgElapsed = [math]::Round(((Get-Date) - $rgStartTime).TotalSeconds, 1)
     Write-StepStatus "" "Success" "$rg (${rgElapsed}s)"
 
-    Write-StepStatus "Getting current Azure AD user" "Started" "2s"
+    Write-StepStatus "Getting current Azure AD user" "Started" "5s"
     $userInfoResult = Invoke-AzCli -Arguments @('ad', 'signed-in-user', 'show', '--query', '{id:id,upn:userPrincipalName}', '--output', 'json')
     OK $userInfoResult "Failed to identify Azure AD user"
     $userInfo = $userInfoResult.TrimmedText | ConvertFrom-Json
@@ -628,7 +628,7 @@ try {
     $currentUserName = $userInfo.upn
     Write-StepStatus "" "Success" "retrieved $currentUserName"
 
-    Write-StepStatus "Creating SQL Server" "Started" "80s"
+    Write-StepStatus "Creating SQL Server" "Started" "1min 20s"
     
     $sqlStartTime = Get-Date
     $sqlServerArgs = @(
@@ -702,7 +702,7 @@ try {
         }
     }
 
-    Write-StepStatus "Checking free database capacity" "Started" "3s"
+    Write-StepStatus "Checking free database capacity" "Started" "5s"
     $freeCheckStartTime = Get-Date
     $canUseFree = $false
     
@@ -735,7 +735,7 @@ try {
     if ($canUseFree) {
         Write-StepStatus "Creating SQL database" "Started" "20s"
     } else {
-        Write-StepStatus "Creating SQL database" "Started" "60s"
+        Write-StepStatus "Creating SQL database" "Started" "1min"
     }
     
     $dbStartTime = Get-Date
@@ -996,7 +996,7 @@ try {
     OK $roleAssignResult "Failed to assign AcrPull role"
     Write-StepStatus "" "Success" "AcrPull role assigned to $container MI"
 
-    Write-StepStatus "Retrieving managed identity display name" "Started" "3s"
+    Write-StepStatus "Retrieving managed identity display name" "Started" "5s"
     
     try {
         $spDisplayName = Get-MI-DisplayName -PrincipalId $principalId
@@ -1291,7 +1291,11 @@ WHERE dp.name = '$escapedUserName';
             owner = $ownerTagValue
         }
     }
-    $deploymentSummary | ConvertTo-Json -Depth 3 | Out-File "dab-deploy-$runTimestamp.json" -Encoding UTF8
+    
+    # Append deployment summary to log file
+    $summaryJson = $deploymentSummary | ConvertTo-Json -Depth 3
+    Add-Content -Path $script:CliLog -Value "`n`n[DEPLOYMENT SUMMARY]"
+    Add-Content -Path $script:CliLog -Value $summaryJson
     
     Write-Host "`nDeployment log saved to: $script:CliLog" -ForegroundColor Green
 
