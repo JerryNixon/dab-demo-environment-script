@@ -1,16 +1,16 @@
 # cleanup.ps1
 # 
-# Deletes all resource groups created by dab-deploy-demo script
+# Deletes resource groups created by dab-deploy-demo script
 # Uses the 'author=dab-deploy-demo-script' tag to identify them
 #
 # Parameters:
 #   -WhatIf: Show what would be deleted without actually deleting
-#   -Force: Skip confirmation prompts
+#   -Force: Skip confirmation prompts (deletes ALL found groups)
 #
 # Examples:
-#   .\cleanup.ps1                    # Interactive mode
+#   .\cleanup.ps1                    # Interactive selection mode (default)
 #   .\cleanup.ps1 -WhatIf            # Dry run
-#   .\cleanup.ps1 -Force             # No prompts
+#   .\cleanup.ps1 -Force             # Delete all without prompts
 #
 param(
     [switch]$WhatIf,
@@ -42,7 +42,9 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 $currentSub = az account show --query name -o tsv
+$currentUser = az account show --query user.name -o tsv
 Write-Host "Current subscription: $currentSub" -ForegroundColor Green
+Write-Host "Current user:         $currentUser" -ForegroundColor Green
 Write-Host ""
 
 # Find resource groups with the author tag
@@ -66,17 +68,46 @@ if ($resourceGroups.Count -eq 0) {
 Write-Host "Found $($resourceGroups.Count) resource group(s):" -ForegroundColor Yellow
 Write-Host ""
 
-# Display found resource groups
-$rgTable = $resourceGroups | ForEach-Object {
-    $created = if ($_.tags.timestamp) { $_.tags.timestamp } else { "unknown" }
-    $owner = if ($_.tags.owner) { $_.tags.owner } else { "unknown" }
-    
-    [PSCustomObject]@{
-        Name     = $_.name
-        Location = $_.location
-        Created  = $created
-        Owner    = $owner
+# Build display table with index
+$rgTable = @()
+$index = 1
+foreach ($rg in $resourceGroups) {
+    # Null-safe tag access using PSObject.Properties
+    $created = "unknown"
+    if ($rg.tags) {
+        $timestampProp = $rg.tags.PSObject.Properties['timestamp']
+        if ($timestampProp) {
+            $ts = $timestampProp.Value
+            # Format as YYYY-MM-DD HH:MM:SS
+            if ($ts -match '^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})$') {
+                $created = "$($Matches[1])-$($Matches[2])-$($Matches[3]) $($Matches[4]):$($Matches[5]):$($Matches[6])"
+            } else {
+                $created = $ts
+            }
+        }
     }
+    
+    $owner = "unknown"
+    if ($rg.tags) {
+        $ownerProp = $rg.tags.PSObject.Properties['owner']
+        if ($ownerProp) {
+            $owner = $ownerProp.Value
+        }
+    }
+    
+    # Get provisioning state
+    $statusProp = $rg.properties.PSObject.Properties['provisioningState']
+    $status = if ($statusProp) { $statusProp.Value } else { "unknown" }
+    
+    $rgTable += [PSCustomObject]@{
+        '#'      = $index
+        Name     = $rg.name
+        Location = $rg.location
+        Owner    = $owner
+        Status   = $status
+        Created  = $created
+    }
+    $index++
 }
 
 $rgTable | Format-Table -AutoSize
@@ -84,23 +115,90 @@ $rgTable | Format-Table -AutoSize
 # WhatIf mode
 if ($WhatIf) {
     Write-Host "WhatIf mode: The following resource groups would be deleted:" -ForegroundColor Yellow
-    $resourceGroups | ForEach-Object { Write-Host "  - $($_.name)" -ForegroundColor White }
+    $resourceGroups | ForEach-Object { 
+        $owner = "unknown"
+        if ($_.tags) {
+            $ownerProp = $_.tags.PSObject.Properties['owner']
+            if ($ownerProp) {
+                $owner = $ownerProp.Value
+            }
+        }
+        $statusProp = $_.properties.PSObject.Properties['provisioningState']
+        $status = if ($statusProp) { $statusProp.Value } else { "unknown" }
+        Write-Host "  - $($_.name) (owner: $owner, status: $status)" -ForegroundColor White 
+    }
     Write-Host ""
     Write-Host "No changes made (WhatIf mode)" -ForegroundColor Cyan
     exit 0
 }
 
-# Confirmation
-if (-not $Force) {
-    Write-Host "WARNING: This will delete all resource groups listed above!" -ForegroundColor Red
-    Write-Host "This action cannot be undone." -ForegroundColor Red
+# Selection logic
+$selectedGroups = @()
+
+if ($Force) {
+    # Delete all
+    $selectedGroups = $resourceGroups
+    Write-Host "Force mode: All $($selectedGroups.Count) resource group(s) will be deleted" -ForegroundColor Yellow
+} else {
+    # Interactive selection
+    Write-Host "Select resource groups to delete:" -ForegroundColor Cyan
+    Write-Host "  - Enter numbers separated by commas (e.g., 1,3,5)" -ForegroundColor White
+    Write-Host "  - Enter 'all' to delete all" -ForegroundColor White
+    Write-Host "  - Press Enter to cancel" -ForegroundColor White
     Write-Host ""
-    $confirm = Read-Host "Continue? (yes/no) [no]"
     
-    if ($confirm -ne 'yes') {
+    $selection = Read-Host "Selection"
+    
+    if ([string]::IsNullOrWhiteSpace($selection)) {
         Write-Host "Cleanup cancelled by user" -ForegroundColor Yellow
         exit 0
     }
+    
+    if ($selection.Trim().ToLower() -eq 'all') {
+        $selectedGroups = $resourceGroups
+    } else {
+        # Parse comma-separated numbers
+        $numbers = $selection -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ -match '^\d+$' } | ForEach-Object { [int]$_ }
+        
+        foreach ($num in $numbers) {
+            if ($num -ge 1 -and $num -le $resourceGroups.Count) {
+                $selectedGroups += $resourceGroups[$num - 1]
+            } else {
+                Write-Host "WARNING: Invalid selection '$num' (valid range: 1-$($resourceGroups.Count))" -ForegroundColor Yellow
+            }
+        }
+    }
+}
+
+if ($selectedGroups.Count -eq 0) {
+    Write-Host "No resource groups selected" -ForegroundColor Yellow
+    exit 0
+}
+
+# Confirmation
+Write-Host ""
+Write-Host "Selected resource groups for deletion:" -ForegroundColor Red
+foreach ($rg in $selectedGroups) {
+    $owner = "unknown"
+    if ($rg.tags) {
+        $ownerProp = $rg.tags.PSObject.Properties['owner']
+        if ($ownerProp) {
+            $owner = $ownerProp.Value
+        }
+    }
+    $statusProp = $rg.properties.PSObject.Properties['provisioningState']
+    $status = if ($statusProp) { $statusProp.Value } else { "unknown" }
+    Write-Host "  - $($rg.name) (owner: $owner, status: $status, location: $($rg.location))" -ForegroundColor White
+}
+Write-Host ""
+Write-Host "WARNING: This action cannot be undone!" -ForegroundColor Red
+Write-Host ""
+
+$confirm = Read-Host "Type 'DELETE' to confirm"
+
+if ($confirm -ne 'DELETE') {
+    Write-Host "Cleanup cancelled by user" -ForegroundColor Yellow
+    exit 0
 }
 
 Write-Host ""
@@ -109,11 +207,30 @@ Write-Host ""
 
 $successCount = 0
 $failCount = 0
+$skippedCount = 0
 $failedGroups = @()
 
-foreach ($rg in $resourceGroups) {
+foreach ($rg in $selectedGroups) {
     $rgName = $rg.name
-    Write-Host "  Deleting: $rgName..." -NoNewline -ForegroundColor Yellow
+    $owner = "unknown"
+    if ($rg.tags) {
+        $ownerProp = $rg.tags.PSObject.Properties['owner']
+        if ($ownerProp) {
+            $owner = $ownerProp.Value
+        }
+    }
+    
+    # Check if already deleting
+    $statusProp = $rg.properties.PSObject.Properties['provisioningState']
+    $status = if ($statusProp) { $statusProp.Value } else { "unknown" }
+    
+    if ($status -eq 'Deleting') {
+        Write-Host "  Skipping: $rgName (owner: $owner) - already deleting" -ForegroundColor DarkGray
+        $skippedCount++
+        continue
+    }
+    
+    Write-Host "  Deleting: $rgName (owner: $owner)..." -NoNewline -ForegroundColor Yellow
     
     $deleteResult = az group delete --name $rgName --yes --no-wait 2>&1
     
@@ -133,8 +250,9 @@ Write-Host "====================================================================
 Write-Host "  CLEANUP SUMMARY" -ForegroundColor Cyan
 Write-Host "================================================================================" -ForegroundColor Cyan
 Write-Host ""
-Write-Host "Total resource groups found:  $($resourceGroups.Count)" -ForegroundColor White
+Write-Host "Resource groups selected:      $($selectedGroups.Count)" -ForegroundColor White
 Write-Host "Successfully queued:           $successCount" -ForegroundColor Green
+Write-Host "Skipped (already deleting):    $skippedCount" -ForegroundColor DarkGray
 Write-Host "Failed:                        $failCount" -ForegroundColor $(if ($failCount -eq 0) { "Green" } else { "Red" })
 Write-Host ""
 
