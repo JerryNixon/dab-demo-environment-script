@@ -1273,18 +1273,27 @@ BEGIN TRY
     ALTER ROLE db_datareader ADD MEMBER [$sqlUserName];
     ALTER ROLE db_datawriter ADD MEMBER [$sqlUserName];
     GRANT EXECUTE TO [$sqlUserName];
+    PRINT 'SUCCESS: Permissions granted to $escapedUserName';
 END TRY
 BEGIN CATCH
-    PRINT 'Error granting MI access: ' + ERROR_MESSAGE();
+    DECLARE @ErrorMessage NVARCHAR(4000) = ERROR_MESSAGE();
+    PRINT 'ERROR: Failed to grant permissions: ' + @ErrorMessage;
     THROW;
 END CATCH
 "@
             $sqlcmdOutput = sqlcmd -S $sqlServerFqdn -d $sqlDb -G -Q $sqlQuery 2>&1 | Out-String
             $sqlExit = $LASTEXITCODE
-            $success = $sqlExit -eq 0
             
-            if (-not $success -and $sqlcmdOutput) {
-                Write-StepStatus "" "Info" "SQL error: $sqlcmdOutput"
+            # Check both exit code AND output for success message
+            $success = $sqlExit -eq 0 -and $sqlcmdOutput -match 'SUCCESS: Permissions granted'
+            
+            if (-not $success) {
+                if ($sqlcmdOutput) {
+                    Write-StepStatus "" "Info" "SQL output: $sqlcmdOutput"
+                }
+                if ($sqlExit -ne 0) {
+                    Write-StepStatus "" "Info" "SQL exit code: $sqlExit"
+                }
             }
         } catch {
             Write-StepStatus "" "Info" "SQL error: $($_.Exception.Message)"
