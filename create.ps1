@@ -101,7 +101,19 @@ function Test-ScriptVersion {
     )
     
     try {
-        $response = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repository/releases/latest" -TimeoutSec 5 -ErrorAction Stop
+        # Suppress error output for missing releases or network issues
+        $previousErrorActionPreference = $ErrorActionPreference
+        $ErrorActionPreference = 'Stop'
+        
+        $response = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repository/releases/latest" -TimeoutSec 5 -ErrorAction SilentlyContinue
+        
+        $ErrorActionPreference = $previousErrorActionPreference
+        
+        if (-not $response) {
+            # No release found, silently continue
+            return
+        }
+        
         $latestVersion = $response.tag_name -replace '^v', ''
         
         # Parse versions for comparison
@@ -139,8 +151,8 @@ function Test-ScriptVersion {
         # Re-throw our intentional version mismatch error
         throw
     } catch {
-        # Silent fail for network issues - don't block deployment if GitHub is unreachable
-        Write-Verbose "Version check skipped: $($_.Exception.Message)"
+        # Silent fail for network issues or missing releases - don't block deployment
+        # (Silently continue - no output needed)
     }
 }
 
