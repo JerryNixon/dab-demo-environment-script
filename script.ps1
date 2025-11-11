@@ -21,6 +21,7 @@
 #   .\script.ps1 -NoCleanup  # Keep resources on failure for debugging
 #   .\script.ps1 -VerifyAdOnlyAuth  # Verify AD-only auth propagation (slower but more thorough)
 #   .\script.ps1 -UpdateImage dab-demo-20251111113005  # Update existing deployment
+#   .\script.ps1 -SkipVersionCheck  # Skip checking for script updates
 #
 param(
     [Parameter(ParameterSetName='Deploy')]
@@ -40,10 +41,12 @@ param(
     [switch]$VerifyAdOnlyAuth,
     
     [Parameter(ParameterSetName='UpdateImage', Mandatory)]
-    [string]$UpdateImage
+    [string]$UpdateImage,
+    
+    [switch]$SkipVersionCheck
 )
 
-$Version = "0.1.7"
+$Version = "0.1.9"
 
 Set-StrictMode -Version Latest
 
@@ -120,19 +123,46 @@ if (-not (Get-Command dab -ErrorAction SilentlyContinue)) {
     Write-Host "After installation, restart your terminal and run this script again." -ForegroundColor White
     throw "DAB CLI is not installed"
 } else {
+    Write-Host "  DAB CLI: " -NoNewline -ForegroundColor Yellow
     try {
         $dabVersionOutput = & dab --version 2>&1 | Out-String
-        if ($dabVersionOutput -match '(\d+\.\d+\.\d+)') {
-            $dabVersion = $Matches[1]
-            Write-Host "  DAB CLI: " -NoNewline -ForegroundColor Yellow
+        if ($dabVersionOutput -match '(\d+)\.(\d+)\.(\d+)(?:-rc)?') {
+            $majorVersion = [int]$Matches[1]
+            $minorVersion = [int]$Matches[2]
+            $patchVersion = [int]$Matches[3]
+            $dabVersion = "$majorVersion.$minorVersion.$patchVersion"
+            
+            # Check minimum version: 1.7.75
+            $isOldVersion = $false
+            if ($majorVersion -lt 1) {
+                $isOldVersion = $true
+            } elseif ($majorVersion -eq 1 -and $minorVersion -lt 7) {
+                $isOldVersion = $true
+            } elseif ($majorVersion -eq 1 -and $minorVersion -eq 7 -and $patchVersion -lt 75) {
+                $isOldVersion = $true
+            }
+            
+            if ($isOldVersion) {
+                Write-Host "Installed ($dabVersion) - TOO OLD" -ForegroundColor Red
+                Write-Host ""
+                Write-Host "ERROR: DAB CLI version $dabVersion is not supported" -ForegroundColor Red
+                Write-Host "Minimum required version: 1.7.75" -ForegroundColor Yellow
+                Write-Host ""
+                Write-Host "Please update DAB CLI:" -ForegroundColor Yellow
+                Write-Host "  dotnet tool update -g Microsoft.DataApiBuilder" -ForegroundColor White
+                throw "DAB CLI version $dabVersion is too old (requires 1.7.75+)"
+            }
+            
             Write-Host "Installed ($dabVersion)" -ForegroundColor Green
         } else {
-            Write-Host "  DAB CLI: " -NoNewline -ForegroundColor Yellow
-            Write-Host "Installed (version unknown)" -ForegroundColor Green
+            Write-Host "Installed (version unknown - cannot verify compatibility)" -ForegroundColor Yellow
+            Write-Host ""
+            Write-Host "WARNING: Unable to determine DAB CLI version" -ForegroundColor Yellow
+            Write-Host "Minimum required version: 1.7.75" -ForegroundColor Yellow
+            Write-Host "If deployment fails, update DAB: dotnet tool update -g Microsoft.DataApiBuilder" -ForegroundColor White
         }
     } catch {
-        Write-Host "  DAB CLI: " -NoNewline -ForegroundColor Yellow
-        Write-Host "Installed (version unknown)" -ForegroundColor Green
+        Write-Host "Installed (version check failed)" -ForegroundColor Yellow
     }
 }
 
@@ -178,14 +208,34 @@ if (-not (Get-Command sqlcmd -ErrorAction SilentlyContinue)) {
     Write-Host "  sqlcmd: " -NoNewline -ForegroundColor Yellow
     try {
         $sqlcmdVersionOutput = & sqlcmd -? 2>&1 | Out-String
-        if ($sqlcmdVersionOutput -match 'Version\s+(\d+\.\d+\.\d+\.\d+)') {
-            $sqlcmdVersion = $Matches[1]
+        if ($sqlcmdVersionOutput -match 'Version\s+(\d+)\.(\d+)\.(\d+)\.(\d+)') {
+            $majorVersion = [int]$Matches[1]
+            $minorVersion = [int]$Matches[2]
+            $sqlcmdVersion = "$majorVersion.$minorVersion.$($Matches[3]).$($Matches[4])"
+            
+            # Check if version supports Azure AD authentication (-G flag)
+            if ($majorVersion -lt 13 -or ($majorVersion -eq 13 -and $minorVersion -lt 1)) {
+                Write-Host "Installed ($sqlcmdVersion) - TOO OLD" -ForegroundColor Red
+                Write-Host ""
+                Write-Host "ERROR: sqlcmd version $sqlcmdVersion does not support Azure AD authentication" -ForegroundColor Red
+                Write-Host "Minimum required version: 13.1.0.0" -ForegroundColor Yellow
+                Write-Host ""
+                Write-Host "Please update sqlcmd:" -ForegroundColor Yellow
+                Write-Host "  Download from: https://aka.ms/ssmsfullsetup" -ForegroundColor White
+                Write-Host "  Or use: winget install Microsoft.SqlServer.2022.CU" -ForegroundColor White
+                throw "sqlcmd version $sqlcmdVersion is too old (requires 13.1+)"
+            }
+            
             Write-Host "Installed ($sqlcmdVersion)" -ForegroundColor Green
         } else {
-            Write-Host "Installed (version unknown)" -ForegroundColor Green
+            Write-Host "Installed (version unknown - cannot verify Azure AD support)" -ForegroundColor Yellow
+            Write-Host ""
+            Write-Host "WARNING: Unable to determine sqlcmd version" -ForegroundColor Yellow
+            Write-Host "Azure AD authentication requires sqlcmd 13.1 or later" -ForegroundColor Yellow
+            Write-Host "If deployment fails, update sqlcmd from: https://aka.ms/ssmsfullsetup" -ForegroundColor White
         }
     } catch {
-        Write-Host "Installed (version unknown)" -ForegroundColor Green
+        Write-Host "Installed (version check failed)" -ForegroundColor Yellow
     }
 }
 
@@ -280,6 +330,11 @@ Write-Host $configHash -ForegroundColor Green
 
 Write-Host ""
 
+# Check for script updates (unless skipped)
+if (-not $SkipVersionCheck) {
+    Test-ScriptVersion -CurrentVersion $Version
+}
+
 Write-Host "Authenticating to Azure..." -ForegroundColor Cyan
 Write-Host "This ensures you're using the correct Azure account and tenant." -ForegroundColor Gray
 Write-Host ""
@@ -342,6 +397,58 @@ function Write-StepStatus {
 }
 
 function OK { param($r, $msg) if($r.ExitCode -ne 0) { throw "$msg`n$($r.Text)" } }
+
+function Test-ScriptVersion {
+    param(
+        [Parameter(Mandatory)]
+        [string]$CurrentVersion,
+        
+        [string]$Repository = "JerryNixon/dab-demo-environment-script"
+    )
+    
+    try {
+        $response = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repository/releases/latest" -TimeoutSec 5 -ErrorAction Stop
+        $latestVersion = $response.tag_name -replace '^v', ''
+        
+        # Parse versions for comparison
+        $current = [version]$CurrentVersion
+        $latest = [version]$latestVersion
+        
+        if ($current -lt $latest) {
+            # Local version is OLDER - show info but continue
+            Write-Host ""
+            Write-Host "NOTE: A newer version is available!" -ForegroundColor Yellow
+            Write-Host "  Current: $CurrentVersion" -ForegroundColor White
+            Write-Host "  Latest:  $latestVersion" -ForegroundColor Green
+            Write-Host "  URL:     $($response.html_url)" -ForegroundColor Cyan
+            Write-Host ""
+            Write-Host "To skip this check: -SkipVersionCheck" -ForegroundColor DarkGray
+            Write-Host ""
+        } elseif ($current -gt $latest) {
+            # Local version is NEWER - this is suspicious, block execution
+            Write-Host ""
+            Write-Host "WARNING: Your script version ($CurrentVersion) is NEWER than the latest release ($latestVersion)" -ForegroundColor Red
+            Write-Host ""
+            Write-Host "This usually means:" -ForegroundColor Yellow
+            Write-Host "  - You're running an unreleased development version" -ForegroundColor White
+            Write-Host "  - The version number in the script is incorrect" -ForegroundColor White
+            Write-Host "  - GitHub releases are out of sync" -ForegroundColor White
+            Write-Host ""
+            Write-Host "Latest release: $($response.html_url)" -ForegroundColor Cyan
+            Write-Host ""
+            Write-Host "To proceed anyway, use: -SkipVersionCheck" -ForegroundColor Yellow
+            Write-Host ""
+            throw "Script version ($CurrentVersion) is newer than latest release ($latestVersion). Use -SkipVersionCheck to bypass."
+        }
+        # If equal, silently continue (versions match)
+    } catch [System.Management.Automation.RuntimeException] {
+        # Re-throw our intentional version mismatch error
+        throw
+    } catch {
+        # Silent fail for network issues - don't block deployment if GitHub is unreachable
+        Write-Verbose "Version check skipped: $($_.Exception.Message)"
+    }
+}
 
 function Test-AzureTokenExpiry {
     param(

@@ -29,7 +29,7 @@ After modifying `dab-config.json`, update just the container image without redep
 > **Fast Updates**: ~3 minutes vs ~8 minutes for full deployment  
 > **Safe**: Only updates container image, doesn't touch database or other infrastructure
 
-> Requires PowerShell 7+, Azure CLI, DAB CLI, and sqlcmd.
+> Requires PowerShell 5.1+, Azure CLI, DAB CLI, and sqlcmd.
 
 ## What Gets Deployed
 
@@ -81,7 +81,9 @@ DAB configuration file **must** reference the connection string as:
 
 ## Features
 
+- **Automatic version checking**: Notifies you when script updates are available (use `-SkipVersionCheck` to disable)
 - **Fast updates**: Update container image in ~3 minutes with `-UpdateImage`
+- **Version validation**: Ensures Azure CLI, DAB CLI, and sqlcmd meet minimum version requirements
 - Entra ID-only authentication (no SQL passwords)
 - Managed identity for database and container registry access
 - Automatic SQL permissions: db_datareader, db_datawriter, and EXECUTE (for stored procedures)
@@ -89,6 +91,7 @@ DAB configuration file **must** reference the connection string as:
 - Custom Docker image with config baked in (no secrets in environment variables)
 - Free-tier database with automatic fallback to paid tier if unavailable
 - Failed deployments auto-cleanup (or preserve with `-NoCleanup` for debugging)
+- **PowerShell 5.1+ compatibility**: Works with both Windows PowerShell and PowerShell Core
 
 ## Updating Your Deployment
 
@@ -128,6 +131,62 @@ After making changes to `dab-config.json`, you can update just the container ima
 **Time comparison:**
 - Full deployment: ~8 minutes
 - Image update: ~3 minutes
+
+## Version Checking
+
+The script automatically checks for updates on each run by querying the latest GitHub release. This helps ensure you're using the most current, tested version.
+
+### Behavior
+
+| Scenario | Action |
+|----------|--------|
+| **Local = Latest** | Silent, continues normally |
+| **Local < Latest** | Shows notification with download link, continues |
+| **Local > Latest** | **Blocks execution** - prevents running unreleased/dev versions |
+| **GitHub unreachable** | Silent fallback, continues (won't block offline deployments) |
+
+### Example Output (Update Available)
+
+```
+Checking prerequisites...
+  Azure CLI: Installed (2.65.0)
+  DAB CLI: Installed (1.7.75)
+  sqlcmd: Installed (15.0.2000.5)
+  database.sql: Found
+  dab-config.json: Found
+  Dockerfile: Found
+  Config hash: a1b2c3d4
+
+NOTE: A newer version is available!
+  Current: 0.1.9
+  Latest:  0.2.0
+  URL:     https://github.com/JerryNixon/dab-demo-environment-script/releases/tag/v0.2.0
+
+To skip this check: -SkipVersionCheck
+
+Authenticating to Azure...
+```
+
+### Skipping Version Check
+
+Use `-SkipVersionCheck` to disable the check:
+
+```powershell
+# For CI/CD pipelines
+.\script.ps1 -Force -SkipVersionCheck
+
+# For offline environments
+.\script.ps1 -SkipVersionCheck
+
+# When running development versions
+.\script.ps1 -SkipVersionCheck
+```
+
+**Why skip?**
+- CI/CD pipelines with pinned script versions
+- Offline/airgapped environments without GitHub access
+- Development/testing of unreleased versions
+- Automated deployments where notifications aren't needed
 
 ## Example Output
 
@@ -271,6 +330,7 @@ ENDPOINTS
 | `-Force` | Skip subscription confirmation | `false` |
 | `-NoCleanup` | Preserve resources on failure (for debugging) | `false` |
 | `-VerifyAdOnlyAuth` | Verify Azure AD-only auth is active (adds ~3min) | `false` |
+| `-SkipVersionCheck` | Skip checking for script updates | `false` |
 
 **Examples:**
 ```powershell
@@ -288,6 +348,9 @@ ENDPOINTS
 
 # Keep resources on failure
 .\script.ps1 -NoCleanup
+
+# Skip version check (for offline use or CI/CD)
+.\script.ps1 -SkipVersionCheck
 ```
 
 ### Update Mode
@@ -301,6 +364,7 @@ ENDPOINTS
 | `-UpdateImage` | Resource group name of existing deployment | Required |
 | `-ConfigPath` | Path to updated DAB config file | `./dab-config.json` |
 | `-Force` | Skip subscription confirmation | `false` |
+| `-SkipVersionCheck` | Skip checking for script updates | `false` |
 
 **Examples:**
 ```powershell
@@ -312,5 +376,8 @@ ENDPOINTS
 
 # Skip confirmation
 .\script.ps1 -UpdateImage dab-demo-20251111113005 -Force
+
+# Skip version check (for CI/CD)
+.\script.ps1 -UpdateImage dab-demo-20251111113005 -SkipVersionCheck
 ```
 
