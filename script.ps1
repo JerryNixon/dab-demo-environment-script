@@ -1025,6 +1025,7 @@ BEGIN TRY
         CREATE USER [$sqlUserName] FROM EXTERNAL PROVIDER;
     ALTER ROLE db_datareader ADD MEMBER [$sqlUserName];
     ALTER ROLE db_datawriter ADD MEMBER [$sqlUserName];
+    GRANT EXECUTE TO [$sqlUserName];
 END TRY
 BEGIN CATCH
     PRINT 'Error granting MI access: ' + ERROR_MESSAGE();
