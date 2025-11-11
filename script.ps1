@@ -43,7 +43,7 @@ param(
     [string]$UpdateImage
 )
 
-$Version = "0.1.3"
+$Version = "0.1.4"
 
 Set-StrictMode -Version Latest
 
@@ -1273,7 +1273,7 @@ BEGIN TRY
     ALTER ROLE db_datareader ADD MEMBER [$sqlUserName];
     ALTER ROLE db_datawriter ADD MEMBER [$sqlUserName];
     GRANT EXECUTE TO [$sqlUserName];
-    PRINT 'SUCCESS: Permissions granted to $escapedUserName';
+    SELECT 'PERMISSION_GRANT_SUCCESS' AS Result;
 END TRY
 BEGIN CATCH
     DECLARE @ErrorMessage NVARCHAR(4000) = ERROR_MESSAGE();
@@ -1285,7 +1285,7 @@ END CATCH
             $sqlExit = $LASTEXITCODE
             
             # Check both exit code AND output for success message
-            $success = $sqlExit -eq 0 -and $sqlcmdOutput -match 'SUCCESS: Permissions granted'
+            $success = $sqlExit -eq 0 -and $sqlcmdOutput -match 'PERMISSION_GRANT_SUCCESS'
             
             if (-not $success) {
                 if ($sqlcmdOutput) {
