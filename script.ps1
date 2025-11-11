@@ -43,9 +43,20 @@ param(
     [string]$UpdateImage
 )
 
-$Version = "0.1.4"
+$Version = "0.1.7"
 
 Set-StrictMode -Version Latest
+
+# Verify PowerShell version (support 5.1 and 7+)
+if ($PSVersionTable.PSVersion.Major -lt 5 -or ($PSVersionTable.PSVersion.Major -eq 5 -and $PSVersionTable.PSVersion.Minor -lt 1)) {
+    Write-Host "ERROR: PowerShell 5.1 or higher is required" -ForegroundColor Red
+    Write-Host "Current version: $($PSVersionTable.PSVersion)" -ForegroundColor Yellow
+    Write-Host ""
+    Write-Host "Please upgrade to PowerShell 5.1 or later:" -ForegroundColor White
+    Write-Host "  - Windows PowerShell 5.1: https://aka.ms/wmf5download" -ForegroundColor Cyan
+    Write-Host "  - PowerShell 7+: https://aka.ms/powershell-release" -ForegroundColor Cyan
+    throw "PowerShell version $($PSVersionTable.PSVersion) is not supported"
+}
 
 $validRegions = @("eastus", "eastus2", "westus", "westus2", "westus3", "centralus", "northcentralus", "southcentralus", "westcentralus", "canadacentral", "canadaeast", "brazilsouth", "northeurope", "westeurope", "uksouth", "ukwest", "francecentral", "germanywestcentral", "norwayeast", "switzerlandnorth", "swedencentral", "eastasia", "southeastasia", "australiaeast", "australiasoutheast", "centralindia", "southindia", "japaneast", "japanwest", "koreacentral", "koreasouth")
 if ($Region -notin $validRegions) {
@@ -527,9 +538,10 @@ OK $accountInfoResult "Failed to retrieve account information after login"
 $accountInfo = $accountInfoResult.TrimmedText | ConvertFrom-Json
 $currentSub = $accountInfo.name
 $currentSubId = $accountInfo.id
-$currentAccountUser = $accountInfo.user?.name
-if (-not $currentAccountUser) { $currentAccountUser = $accountInfo.user?.userName }
-if (-not $currentAccountUser) { $currentAccountUser = $accountInfo.user?.userPrincipalName }
+# PS 5.1 compatible null-safe property access
+$currentAccountUser = if ($accountInfo.user) { $accountInfo.user.name } else { $null }
+if (-not $currentAccountUser -and $accountInfo.user) { $currentAccountUser = $accountInfo.user.userName }
+if (-not $currentAccountUser -and $accountInfo.user) { $currentAccountUser = $accountInfo.user.userPrincipalName }
 if (-not $currentAccountUser) { $currentAccountUser = "unknown-principal" }
 
 $ownerTagValue = "unknown-owner"
@@ -855,7 +867,7 @@ try {
                 "",
                 "What to try next:",
                 "  1. Confirm you targeted the right subscription: az account list --output table",
-                "  2. If you recently changed tenants or accounts, refresh credentials: az login [--tenant <tenant-id>]",
+                "  2. If you recently changed tenants or accounts, refresh credentials: az login [--tenant TENANT_ID]",
                 "  3. Ask a subscription Owner to grant you the Contributor role.",
                 "",
                 "Raw Azure CLI error:",
