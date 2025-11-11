@@ -46,7 +46,7 @@ param(
     [switch]$SkipVersionCheck
 )
 
-$Version = "0.1.9"
+$Version = "0.2.0"
 
 Set-StrictMode -Version Latest
 
@@ -949,7 +949,7 @@ try {
     # ============================================================================
     $rg = "dab-demo-$runTimestamp"
     $acaEnv = "aca-environment"
-    $container = "data-api-container"
+    $container = "dab-container-$runTimestamp"
     $sqlServer = "sql-server-$runTimestamp"
     $sqlDb = "sql-database"
     $logAnalytics = "log-workspace"
