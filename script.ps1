@@ -1062,6 +1062,58 @@ END CATCH
     $sqlElapsed = [math]::Round(((Get-Date) - $sqlStartTime).TotalSeconds, 0)
     Write-StepStatus "" "Success" "$sqlUserName granted access to $sqlDb (${sqlElapsed}s)"
     
+    Write-StepStatus "Verifying SQL permissions" "Started" "3s"
+    $verifyStartTime = Get-Date
+    
+    try {
+        $verifyPermsQuery = @"
+SELECT 
+    dp.name AS PrincipalName,
+    dp.type_desc AS PrincipalType,
+    CASE 
+        WHEN EXISTS (SELECT 1 FROM sys.database_role_members drm 
+                     JOIN sys.database_principals r ON drm.role_principal_id = r.principal_id 
+                     WHERE drm.member_principal_id = dp.principal_id AND r.name = 'db_datareader') 
+        THEN 'YES' ELSE 'NO' END AS HasDataReader,
+    CASE 
+        WHEN EXISTS (SELECT 1 FROM sys.database_role_members drm 
+                     JOIN sys.database_principals r ON drm.role_principal_id = r.principal_id 
+                     WHERE drm.member_principal_id = dp.principal_id AND r.name = 'db_datawriter') 
+        THEN 'YES' ELSE 'NO' END AS HasDataWriter,
+    CASE 
+        WHEN EXISTS (SELECT 1 FROM sys.database_permissions p 
+                     WHERE p.grantee_principal_id = dp.principal_id 
+                     AND p.permission_name = 'EXECUTE' 
+                     AND p.state_desc = 'GRANT') 
+        THEN 'YES' ELSE 'NO' END AS HasExecute
+FROM sys.database_principals dp
+WHERE dp.name = '$escapedUserName';
+"@
+        
+        $verifyOutput = sqlcmd -S $sqlServerFqdn -d $sqlDb -G -Q $verifyPermsQuery -h -1 -W 2>&1 | Out-String
+        $verifyExit = $LASTEXITCODE
+        
+        $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+        Add-Content -Path $script:CliLog -Value "[$timestamp] [INFO] Permission verification for $sqlUserName`n$verifyOutput`n"
+        
+        if ($verifyExit -eq 0) {
+            $hasExecute = $verifyOutput -match 'YES\s+YES\s+YES'
+            
+            if ($hasExecute) {
+                $verifyElapsed = [math]::Round(((Get-Date) - $verifyStartTime).TotalSeconds, 1)
+                Write-StepStatus "" "Success" "Permissions verified: db_datareader, db_datawriter, EXECUTE (${verifyElapsed}s)"
+            } else {
+                $verifyElapsed = [math]::Round(((Get-Date) - $verifyStartTime).TotalSeconds, 1)
+                Write-StepStatus "" "Info" "Permissions applied but verification incomplete (${verifyElapsed}s)"
+            }
+        } else {
+            $verifyElapsed = [math]::Round(((Get-Date) - $verifyStartTime).TotalSeconds, 1)
+            Write-StepStatus "" "Info" "Permission verification query failed, but grants succeeded (${verifyElapsed}s)"
+        }
+    } catch {
+        Write-StepStatus "" "Info" "Permission verification skipped: $($_.Exception.Message)"
+    }
+    
     $restartStartTime = Get-Date
     Write-StepStatus "Restarting container to activate managed identity" "Started" "10s"
     
