@@ -1,3 +1,6 @@
+$ScriptVersion = "0.2.2"
+$MinimumDabVersion = "1.7.81-rc"  # Minimum required DAB CLI version (note: comparison strips -rc suffix)
+
 # Deploy Data API Builder with Azure SQL Database and Container Apps
 # 
 # Parameters:
@@ -46,9 +49,6 @@ param(
     [switch]$SkipVersionCheck
 )
 
-$Version = "0.2.1"
-$MinimumDabVersion = "1.7.81-rc"  # Minimum required DAB CLI version (note: comparison strips -rc suffix)
-
 Set-StrictMode -Version Latest
 
 # Verify PowerShell version (support 5.1 and 7+)
@@ -88,7 +88,7 @@ $runTimestamp = Get-Date -Format "yyyyMMddHHmmss"
 
 $script:CliLog = Join-Path $PSScriptRoot "$runTimestamp.log"
 
-"[$(Get-Date -Format o)] CLI command log - version $Version" | Out-File $script:CliLog
+"[$(Get-Date -Format o)] CLI command log - version $ScriptVersion" | Out-File $script:CliLog
 
 # Helper functions (must be defined before use)
 function OK { param($r, $msg) if($r.ExitCode -ne 0) { throw "$msg`n$($r.Text)" } }
@@ -103,8 +103,8 @@ function Test-ScriptVersion {
         # Fetch the version directly from the script on GitHub
         $scriptContent = Invoke-RestMethod -Uri "https://raw.githubusercontent.com/JerryNixon/dab-demo-environment-script/refs/heads/main/create.ps1" -TimeoutSec 5 -ErrorAction Stop
         
-        # Extract version from the script (look for $Version = "x.y.z")
-        if ($scriptContent -match '\$Version\s*=\s*"([0-9]+\.[0-9]+\.[0-9]+)"') {
+        # Extract version from the script (look for $ScriptVersion = "x.y.z")
+        if ($scriptContent -match '\$ScriptVersion\s*=\s*"([0-9]+\.[0-9]+\.[0-9]+)"') {
             $latestVersion = $matches[1]
             
             # Parse versions for comparison
@@ -148,7 +148,7 @@ function Test-ScriptVersion {
     }
 }
 
-Write-Host "dab-deploy-demo version $Version" -ForegroundColor Cyan
+Write-Host "dab-deploy-demo version $ScriptVersion" -ForegroundColor Cyan
 Write-Host ""
 
 Write-Host "Checking prerequisites..." -ForegroundColor Cyan
@@ -384,7 +384,7 @@ Write-Host ""
 
 # Check for script updates (unless skipped)
 if (-not $SkipVersionCheck) {
-    Test-ScriptVersion -CurrentVersion $Version
+    Test-ScriptVersion -CurrentVersion $ScriptVersion
 }
 
 Write-Host "Authenticating to Azure..." -ForegroundColor Cyan
@@ -620,7 +620,7 @@ if ($currentAccountUser -and $currentAccountUser -match '^([^@]+)@') {
         $ownerTagValue = ($ownerLocalPart -replace '[^a-z0-9._-]', '-').ToLowerInvariant()
     }
 }
-$commonTagValues = @('author=dab-deploy-demo-script', "version=$Version", "owner=$ownerTagValue")
+$commonTagValues = @('author=dab-deploy-demo-script', "version=$ScriptVersion", "owner=$ownerTagValue")
 
 Write-Host "`nCurrent subscription:" -ForegroundColor Cyan
 Write-Host "  Name: $currentSub" -ForegroundColor White
@@ -1571,7 +1571,7 @@ WHERE dp.name = '$escapedUserName';
         SubscriptionName = $currentSub
         Region = $Region
         Timestamp = $runTimestamp
-        Version = $Version
+        Version = $ScriptVersion
         PowerShellVersion = $PSVersionTable.PSVersion.ToString()
         Resources = @{
             SqlServer = $sqlServer
@@ -1585,7 +1585,7 @@ WHERE dp.name = '$escapedUserName';
         CurrentUser = $currentUserName
         Tags = @{
             author = 'dab-deploy-demo-script'
-            version = $Version
+            version = $ScriptVersion
             owner = $ownerTagValue
         }
     }
