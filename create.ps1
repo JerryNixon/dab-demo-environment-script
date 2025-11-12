@@ -1,6 +1,3 @@
-$ScriptVersion = "0.2.2"
-$MinimumDabVersion = "1.7.81-rc"  # Minimum required DAB CLI version (note: comparison strips -rc suffix)
-
 # Deploy Data API Builder with Azure SQL Database and Container Apps
 # 
 # Parameters:
@@ -48,6 +45,9 @@ param(
     
     [switch]$SkipVersionCheck
 )
+
+$ScriptVersion = "0.2.3"
+$MinimumDabVersion = "1.7.81-rc"  # Minimum required DAB CLI version (note: comparison strips -rc suffix)
 
 Set-StrictMode -Version Latest
 
