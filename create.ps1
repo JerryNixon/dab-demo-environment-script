@@ -47,6 +47,7 @@ param(
 )
 
 $Version = "0.2.1"
+$MinimumDabVersion = "1.7.81-rc"  # Minimum required DAB CLI version (note: comparison strips -rc suffix)
 
 Set-StrictMode -Version Latest
 
@@ -190,25 +191,20 @@ if (-not (Get-Command dab -ErrorAction SilentlyContinue)) {
             $patchVersion = [int]$Matches[3]
             $dabVersion = "$majorVersion.$minorVersion.$patchVersion"
             
-            # Check minimum version: 1.7.75
-            $isOldVersion = $false
-            if ($majorVersion -lt 1) {
-                $isOldVersion = $true
-            } elseif ($majorVersion -eq 1 -and $minorVersion -lt 7) {
-                $isOldVersion = $true
-            } elseif ($majorVersion -eq 1 -and $minorVersion -eq 7 -and $patchVersion -lt 75) {
-                $isOldVersion = $true
-            }
+            # Check minimum version (strip -rc suffix for comparison)
+            $minRequiredBase = $MinimumDabVersion -replace '-rc$', ''
+            $minRequired = [version]$minRequiredBase
+            $isOldVersion = ([version]$dabVersion) -lt $minRequired
             
             if ($isOldVersion) {
                 Write-Host "Installed ($dabVersion) - TOO OLD" -ForegroundColor Red
                 Write-Host ""
                 Write-Host "ERROR: DAB CLI version $dabVersion is not supported" -ForegroundColor Red
-                Write-Host "Minimum required version: 1.7.75" -ForegroundColor Yellow
+                Write-Host "Minimum required version: $MinimumDabVersion" -ForegroundColor Yellow
                 Write-Host ""
                 Write-Host "Please update DAB CLI:" -ForegroundColor Yellow
                 Write-Host "  dotnet tool update -g Microsoft.DataApiBuilder" -ForegroundColor White
-                throw "DAB CLI version $dabVersion is too old (requires 1.7.75+)"
+                throw "DAB CLI version $dabVersion is too old (requires $MinimumDabVersion+)"
             }
             
             Write-Host "Installed ($dabVersion)" -ForegroundColor Green
@@ -216,7 +212,7 @@ if (-not (Get-Command dab -ErrorAction SilentlyContinue)) {
             Write-Host "Installed (version unknown - cannot verify compatibility)" -ForegroundColor Yellow
             Write-Host ""
             Write-Host "WARNING: Unable to determine DAB CLI version" -ForegroundColor Yellow
-            Write-Host "Minimum required version: 1.7.75" -ForegroundColor Yellow
+            Write-Host "Minimum required version: $MinimumDabVersion" -ForegroundColor Yellow
             Write-Host "If deployment fails, update DAB: dotnet tool update -g Microsoft.DataApiBuilder" -ForegroundColor White
         }
     } catch {
@@ -286,14 +282,10 @@ if (-not (Get-Command sqlcmd -ErrorAction SilentlyContinue)) {
             
             Write-Host "Installed ($sqlcmdVersion)" -ForegroundColor Green
         } else {
-            Write-Host "Installed (version unknown - cannot verify Azure AD support)" -ForegroundColor Yellow
-            Write-Host ""
-            Write-Host "WARNING: Unable to determine sqlcmd version" -ForegroundColor Yellow
-            Write-Host "Azure AD authentication requires sqlcmd 13.1 or later" -ForegroundColor Yellow
-            Write-Host "If deployment fails, update sqlcmd from: https://aka.ms/ssmsfullsetup" -ForegroundColor White
+            Write-Host "Installed (version unknown - 13.1+ required)" -ForegroundColor Yellow
         }
     } catch {
-        Write-Host "Installed (version check failed)" -ForegroundColor Yellow
+        Write-Host "Installed (version unknown - 13.1+ required)" -ForegroundColor Yellow
     }
 }
 
@@ -394,8 +386,6 @@ if (-not $SkipVersionCheck) {
 }
 
 Write-Host "Authenticating to Azure..." -ForegroundColor Cyan
-Write-Host "This ensures you're using the correct Azure account and tenant." -ForegroundColor Gray
-Write-Host ""
 
 try {
     az login --output none 2>&1 | Out-Null
@@ -408,6 +398,7 @@ try {
     Write-Host "Please ensure you have access to an Azure subscription and try again." -ForegroundColor Yellow
     throw "Azure authentication failed: $($_.Exception.Message)"
 }
+Write-Host ""
 
 $tenantId = az account show --query tenantId -o tsv
 $subscriptionId = az account show --query id -o tsv
@@ -589,8 +580,9 @@ function Write-DeploymentSummary {
     $configColor = if (Test-Path "./dab-config.json") { "Green" } else { "Yellow" }
     Write-Host "  DAB Config:       $configStatus" -ForegroundColor $configColor
     Write-Host "  1. Test API: curl $ContainerUrl/swagger"
-    Write-Host "  2. View logs: az containerapp logs show -n $Container -g $ResourceGroup --follow"
-    Write-Host "  3. Cleanup:  az group delete -n $ResourceGroup -y"
+    Write-Host "  2. Test GraphQL: curl $ContainerUrl/graphql"
+    Write-Host "  3. View logs: az containerapp logs show -n $Container -g $ResourceGroup --follow"
+    Write-Host "  4. Cleanup:  az group delete -n $ResourceGroup -y"
     
     Write-Host "`nSECURITY NOTE" -ForegroundColor DarkYellow
     Write-Host "  Your local IP ($ClientIp) has been allowed in the SQL Server firewall."
@@ -736,56 +728,9 @@ try {
         Write-Host "  Config File:    $ConfigPath" -ForegroundColor White
         Write-Host ""
         
-        # Subscription confirmation (same as Deploy mode)
-        if (-not $Force) {
-            $confirm = Read-Host "`nUpdate resources in this subscription? (y/n/list) [y]"
-            if ($confirm) { $confirm = $confirm.Trim().ToLowerInvariant() }
-
-            if ($confirm -eq 'list' -or $confirm -eq 'l') {
-                Write-Host "`nAvailable subscriptions:" -ForegroundColor Cyan
-                $subscriptionListResult = Invoke-AzCli -Arguments @('account', 'list', '--query', '[].{name:name, id:id, isDefault:isDefault}', '--output', 'json')
-                OK $subscriptionListResult "Failed to list subscriptions"
-                $subscriptions = $subscriptionListResult.TrimmedText | ConvertFrom-Json
-                
-                for ($i = 0; $i -lt $subscriptions.Count; $i++) {
-                    $sub = $subscriptions[$i]
-                    $marker = if ($sub.isDefault) { " (current)" } else { "" }
-                    $color = if ($sub.isDefault) { "Green" } else { "White" }
-                    Write-Host "$($i + 1). $($sub.name)$marker" -ForegroundColor $color
-                    Write-Host "   ID: $($sub.id)" -ForegroundColor DarkGray
-                }
-                
-                do {
-                    $choice = Read-Host "`nSelect subscription (1-$($subscriptions.Count)) or press Enter to keep current"
-                    if ([string]::IsNullOrWhiteSpace($choice)) { 
-                        break 
-                    }
-                } while ($choice -notmatch '^\d+$' -or [int]$choice -lt 1 -or [int]$choice -gt $subscriptions.Count)
-                
-                if (-not [string]::IsNullOrWhiteSpace($choice)) {
-                    $selectedSub = $subscriptions[[int]$choice - 1]
-                    Write-Host "Switching to subscription: $($selectedSub.name)" -ForegroundColor Yellow
-                    $setSubscriptionResult = Invoke-AzCli -Arguments @('account', 'set', '--subscription', $selectedSub.id)
-                    OK $setSubscriptionResult "Failed to switch subscription"
-                    $accountInfoResult = Invoke-AzCli -Arguments @('account', 'show', '--output', 'json')
-                    OK $accountInfoResult "Failed to refresh subscription context"
-                    $accountInfo = $accountInfoResult.TrimmedText | ConvertFrom-Json
-                    $currentSub = $accountInfo.name
-                    $currentSubId = $accountInfo.id
-                    Write-Host "Now using: $currentSub" -ForegroundColor Green
-                }
-            } elseif ($confirm -and $confirm -ne 'y') {
-                Write-Host "Update cancelled by user" -ForegroundColor Yellow
-                exit 0
-            }
-            
-            $estimatedFinishTime = (Get-Date).AddMinutes(3).ToString("HH:mm:ss")
-            Write-Host "`nStarting image update. Estimated time to complete: 3m (finish ~$estimatedFinishTime)" -ForegroundColor Cyan
-        } else {
-            Write-Host "  -Force specified: skipping confirmation" -ForegroundColor Yellow
-            $estimatedFinishTime = (Get-Date).AddMinutes(3).ToString("HH:mm:ss")
-            Write-Host "`nStarting image update. Estimated time to complete: 3m (finish ~$estimatedFinishTime)" -ForegroundColor Cyan
-        }
+        $estimatedFinishTime = (Get-Date).AddMinutes(3).ToString("HH:mm:ss")
+        Write-Host "Starting image update. Estimated time to complete: 3m (finish ~$estimatedFinishTime)" -ForegroundColor Cyan
+        Write-Host ""
         
         # Verify resource group exists
         Write-StepStatus "Verifying resource group" "Started" "5s"
@@ -812,7 +757,7 @@ try {
         $acrLoginServer = $acrLoginServerResult.TrimmedText
         
         # Find Container App
-        $containerListResult = Invoke-AzCli -Arguments @('containerapp', 'list', '--resource-group', $rg, '--query', "[?tags.author=='dab-deploy-demo-script'].name", '--output', 'tsv')
+        $containerListResult = Invoke-AzCli -Arguments @('containerapp', 'list', '--resource-group', $rg, '--query', "[?tags.author=='dab-deploy-demo-script'].name", '--output', 'tsv', '--only-show-errors')
         if ([string]::IsNullOrWhiteSpace($containerListResult.TrimmedText)) {
             throw "No Container App found in resource group '$rg' with expected tags (author=dab-deploy-demo-script)"
         }
@@ -1688,7 +1633,11 @@ WHERE dp.name = '$escapedUserName';
     $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
     Add-Content -Path $script:CliLog -Value "[$timestamp] [ERR] DEPLOYMENT FAILED`n$($_.Exception.Message)`n$($_.ScriptStackTrace)`n"
     
-    if (-not $NoCleanup -and $rg) {
+    # Only cleanup in Deploy mode, NEVER in UpdateImage mode
+    if ($PSCmdlet.ParameterSetName -eq 'UpdateImage') {
+        Write-Host "`nUpdate failed - resource group preserved (UpdateImage mode never deletes resources)" -ForegroundColor Yellow
+        Write-Host "Resource group: $rg" -ForegroundColor Cyan
+    } elseif (-not $NoCleanup -and $rg) {
         Write-Host "`nCleaning up partial deployment..." -ForegroundColor Yellow
         
         $deleteArgs = @('group', 'delete', '--name', $rg, '--yes', '--no-wait')
