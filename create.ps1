@@ -284,10 +284,10 @@ if (-not (Get-Command sqlcmd -ErrorAction SilentlyContinue)) {
             
             Write-Host "Installed ($sqlcmdVersion)" -ForegroundColor Green
         } else {
-            Write-Host "Installed (version unknown - 13.1+ required)" -ForegroundColor Yellow
+            Write-Host "Installed (version unknown - 13.1+ required)" -ForegroundColor Green
         }
     } catch {
-        Write-Host "Installed (version unknown - 13.1+ required)" -ForegroundColor Yellow
+        Write-Host "Installed (version unknown - 13.1+ required)" -ForegroundColor Green
     }
 }
 
@@ -543,59 +543,24 @@ function Write-DeploymentSummary {
     OK $subscriptionIdResult "Failed to retrieve subscription id for summary"
     $subscriptionId = $subscriptionIdResult.TrimmedText
     
-    Write-Host "`n" -NoNewline
-    Write-Host "================================================================================"
-    Write-Host "  DAB DEMO DEPLOYMENT SUMMARY" -ForegroundColor Green
-    Write-Host "================================================================================"
+    Write-Host "`n================================================================================" -ForegroundColor Green
+    Write-Host "  ✓ DEPLOYMENT SUCCESSFUL ($TotalTime)" -ForegroundColor Green
+    Write-Host "================================================================================" -ForegroundColor Green
     
-    Write-Host "`nRESOURCES CREATED" -ForegroundColor Cyan
+    Write-Host "`nDEPLOYED RESOURCES" -ForegroundColor Cyan
     Write-Host "  Resource Group:    $ResourceGroup"
     Write-Host "  Region:            $Region"
-    Write-Host ""
     Write-Host "  SQL Server:        $SqlServer"
-    Write-Host "    Database:        $SqlDatabase ($DatabaseType)"
-    Write-Host "    Auth Method:     Azure AD Only"
-    Write-Host "    Admin:           $CurrentUser"
-    Write-Host "    Purpose:         Hosts demo database with managed identity access"
-    Write-Host ""
+    Write-Host "  Database:          $SqlDatabase ($DatabaseType)"
     Write-Host "  Container App:     $Container"
-    Write-Host "    Environment:     $Environment"
-    Write-Host "    Identity:        System-assigned managed identity"
-    Write-Host "    Purpose:         Runs Data API Builder with SQL connectivity"
-    Write-Host "    Config:          Baked into container image at /App/dab-config.json"
-    Write-Host ""
-    Write-Host "  Log Analytics:     $LogAnalytics"
-    Write-Host "    Purpose:         Container Apps environment logging"
     
-    Write-Host "`nENDPOINTS" -ForegroundColor Cyan
-    Write-Host "  DAB API:          $ContainerUrl"
-    Write-Host "  SQL Server:       $SqlServerFqdn"
-    Write-Host "  Logs (CLI):       az containerapp logs show -n $Container -g $ResourceGroup --follow"
-    Write-Host "  Portal RG:        https://portal.azure.com/#view/HubsExtension/BrowseResourceGroups/resourceGroup/$ResourceGroup"
-    Write-Host "  Portal SQL:       https://portal.azure.com/#@/resource/subscriptions/$subscriptionId/resourceGroups/$ResourceGroup/providers/Microsoft.Sql/servers/$SqlServer"
-    Write-Host "  Portal Container: https://portal.azure.com/#@/resource/subscriptions/$subscriptionId/resourceGroups/$ResourceGroup/providers/Microsoft.App/containerApps/$Container"
-    Write-Host "  Portal Logs:      https://portal.azure.com/#@/resource/subscriptions/$subscriptionId/resourceGroups/$ResourceGroup/providers/Microsoft.OperationalInsights/workspaces/$LogAnalytics"
+    Write-Host "`nQUICK LINKS" -ForegroundColor Cyan
+    Write-Host "  Portal:            https://portal.azure.com/#view/HubsExtension/BrowseResourceGroups/resourceGroup/$ResourceGroup"
+    Write-Host "  Swagger:           $ContainerUrl/swagger"
+    Write-Host "  GraphQL:           $ContainerUrl/graphql"
+    Write-Host "  Health:            $ContainerUrl/health"
     
-    Write-Host "`nNEXT STEPS" -ForegroundColor Yellow
-    $configStatus = if (Test-Path "./dab-config.json") { "auto-configured" } else { "requires manual dab-config.json" }
-    $configColor = if (Test-Path "./dab-config.json") { "Green" } else { "Yellow" }
-    Write-Host "  DAB Config:       $configStatus" -ForegroundColor $configColor
-    Write-Host "  1. Test API: curl $ContainerUrl/swagger"
-    Write-Host "  2. Test GraphQL: curl $ContainerUrl/graphql"
-    Write-Host "  3. View logs: az containerapp logs show -n $Container -g $ResourceGroup --follow"
-    Write-Host "  4. Cleanup:  az group delete -n $ResourceGroup -y"
-    
-    Write-Host "`nSECURITY NOTE" -ForegroundColor DarkYellow
-    Write-Host "  Your local IP ($ClientIp) has been allowed in the SQL Server firewall."
-    Write-Host "  Remove when no longer needed: az sql server firewall-rule delete -g $ResourceGroup -s $SqlServer -n $FirewallRuleName"
-    
-    Write-Host "`nDEPLOYMENT INFO" -ForegroundColor Magenta
-    Write-Host "  Total time: $TotalTime"
-    Write-Host "  Version: $Version"
-    Write-Host "  PowerShell: $($PSVersionTable.PSVersion)"
-    Write-Host "  Timestamp: $runTimestamp"
-    
-    Write-Host "================================================================================"
+    Write-Host "`n================================================================================" -ForegroundColor Green
 }
 
 function Assert-ResourceNameLength {
@@ -704,11 +669,11 @@ if (-not $Force) {
     }
     
     $estimatedFinishTime = (Get-Date).AddMinutes(8).ToString("HH:mm:ss")
-    Write-Host "`nStarting deployment. Estimated time to complete: 8m (finish ~$estimatedFinishTime)" -ForegroundColor Cyan
+    Write-Host "Starting deployment. Estimated time to complete: 8m (finish ~$estimatedFinishTime)" -ForegroundColor Cyan
 } else {
     Write-Host "  -Force specified: skipping confirmation" -ForegroundColor Yellow
     $estimatedFinishTime = (Get-Date).AddMinutes(8).ToString("HH:mm:ss")
-    Write-Host "`nStarting deployment. Estimated time to complete: 8m (finish ~$estimatedFinishTime)" -ForegroundColor Cyan
+    Write-Host "Starting deployment. Estimated time to complete: 8m (finish ~$estimatedFinishTime)" -ForegroundColor Cyan
 }
 
 try {
@@ -1632,6 +1597,8 @@ WHERE dp.name = '$escapedUserName';
     
     Write-Host "`nDeployment log saved to: $script:CliLog" -ForegroundColor Green
 
+    exit 0
+
 } catch {
     Write-Host "`n"
     Write-Host ("=" * 85) -ForegroundColor Red
@@ -1677,12 +1644,4 @@ WHERE dp.name = '$escapedUserName';
 } finally {
     $ErrorActionPreference = 'Continue'
 }
-
-Write-Host "`n================================================================================" -ForegroundColor Green
-Write-Host "  ✓ DEPLOYMENT SUCCESSFUL" -ForegroundColor Green
-Write-Host "================================================================================" -ForegroundColor Green
-Write-Host ""
-
-exit 0
-
 
