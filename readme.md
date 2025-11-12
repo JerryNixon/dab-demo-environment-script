@@ -52,10 +52,10 @@ All resources are automatically tagged:
 
 ## Prerequisites
 
-* **PowerShell 5.1 or higher** (PowerShell 7+ recommended for best experience)
+* **PowerShell 5.1 or higher** [Install](https://learn.microsoft.com/en-us/powershell/scripting/install/installing-powershell-on-windows?view=powershell-7.5)
 * **Azure CLI** - [Install](https://aka.ms/installazurecliwindows)
-* **DAB CLI** - Required for configuration validation
-* **sqlcmd** - Auto-installed via winget if available
+* **DAB CLI** - [Install](https://learn.microsoft.com/en-us/azure/data-api-builder/command-line/install)
+* **SQLCMD** - [Install](https://learn.microsoft.com/en-us/sql/tools/sqlcmd/sqlcmd-download-install?view=sql-server-ver17&tabs=windows)
 * **Contributor** or **Owner** role on target subscription
 
 > **Note**: The script is compatible with both PowerShell 5.1 and PowerShell 7+. However, PowerShell 7+ is recommended for improved performance and features.
