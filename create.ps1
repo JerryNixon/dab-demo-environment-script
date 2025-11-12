@@ -95,66 +95,54 @@ function OK { param($r, $msg) if($r.ExitCode -ne 0) { throw "$msg`n$($r.Text)" }
 function Test-ScriptVersion {
     param(
         [Parameter(Mandatory)]
-        [string]$CurrentVersion,
-        
-        [string]$Repository = "JerryNixon/dab-demo-environment-script",
-        [string]$ScriptFile = "script.ps1"
+        [string]$CurrentVersion
     )
     
     try {
-        # Suppress error output for missing releases or network issues
-        $previousErrorActionPreference = $ErrorActionPreference
-        $ErrorActionPreference = 'Stop'
+        # Fetch the version directly from the script on GitHub
+        $scriptContent = Invoke-RestMethod -Uri "https://raw.githubusercontent.com/JerryNixon/dab-demo-environment-script/refs/heads/main/create.ps1" -TimeoutSec 5 -ErrorAction Stop
         
-        $response = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repository/releases/latest" -TimeoutSec 5 -ErrorAction SilentlyContinue
-        
-        $ErrorActionPreference = $previousErrorActionPreference
-        
-        if (-not $response) {
-            # No release found, silently continue
-            return
+        # Extract version from the script (look for $Version = "x.y.z")
+        if ($scriptContent -match '\$Version\s*=\s*"([0-9]+\.[0-9]+\.[0-9]+)"') {
+            $latestVersion = $matches[1]
+            
+            # Parse versions for comparison
+            $current = [version]$CurrentVersion
+            $latest = [version]$latestVersion
+            
+            if ($current -lt $latest) {
+                # Local version is OLDER - show info but continue
+                Write-Host ""
+                Write-Host "NOTE: A newer version is available!" -ForegroundColor Yellow
+                Write-Host "  Current: $CurrentVersion" -ForegroundColor White
+                Write-Host "  Latest:  $latestVersion" -ForegroundColor Green
+                Write-Host "  Script:  https://github.com/JerryNixon/dab-demo-environment-script/blob/main/create.ps1" -ForegroundColor Cyan
+                Write-Host ""
+                Write-Host "To skip this check: -SkipVersionCheck" -ForegroundColor DarkGray
+                Write-Host ""
+            } elseif ($current -gt $latest) {
+                # Local version is NEWER - this is suspicious, block execution
+                Write-Host ""
+                Write-Host "WARNING: Your script version ($CurrentVersion) is NEWER than the GitHub version ($latestVersion)" -ForegroundColor Red
+                Write-Host ""
+                Write-Host "This usually means:" -ForegroundColor Yellow
+                Write-Host "  - You're running an unreleased development version" -ForegroundColor White
+                Write-Host "  - The version number in the script is incorrect" -ForegroundColor White
+                Write-Host "  - GitHub is out of sync" -ForegroundColor White
+                Write-Host ""
+                Write-Host "Script: https://github.com/JerryNixon/dab-demo-environment-script/blob/main/create.ps1" -ForegroundColor Cyan
+                Write-Host ""
+                Write-Host "To proceed anyway, use: -SkipVersionCheck" -ForegroundColor Yellow
+                Write-Host ""
+                throw "Script version ($CurrentVersion) is newer than GitHub version ($latestVersion). Use -SkipVersionCheck to bypass."
+            }
+            # If equal, silently continue (versions match)
         }
-        
-        $latestVersion = $response.tag_name -replace '^v', ''
-        
-        # Parse versions for comparison
-        $current = [version]$CurrentVersion
-        $latest = [version]$latestVersion
-        
-        if ($current -lt $latest) {
-            # Local version is OLDER - show info but continue
-            Write-Host ""
-            Write-Host "NOTE: A newer version is available!" -ForegroundColor Yellow
-            Write-Host "  Current: $CurrentVersion" -ForegroundColor White
-            Write-Host "  Latest:  $latestVersion" -ForegroundColor Green
-            Write-Host "  Release: $($response.html_url)" -ForegroundColor Cyan
-            Write-Host "  Script:  https://github.com/$Repository/blob/main/$ScriptFile" -ForegroundColor Cyan
-            Write-Host ""
-            Write-Host "To skip this check: -SkipVersionCheck" -ForegroundColor DarkGray
-            Write-Host ""
-        } elseif ($current -gt $latest) {
-            # Local version is NEWER - this is suspicious, block execution
-            Write-Host ""
-            Write-Host "WARNING: Your script version ($CurrentVersion) is NEWER than the latest release ($latestVersion)" -ForegroundColor Red
-            Write-Host ""
-            Write-Host "This usually means:" -ForegroundColor Yellow
-            Write-Host "  - You're running an unreleased development version" -ForegroundColor White
-            Write-Host "  - The version number in the script is incorrect" -ForegroundColor White
-            Write-Host "  - GitHub releases are out of sync" -ForegroundColor White
-            Write-Host ""
-            Write-Host "Release: $($response.html_url)" -ForegroundColor Cyan
-            Write-Host "Script:  https://github.com/$Repository/blob/main/$ScriptFile" -ForegroundColor Cyan
-            Write-Host ""
-            Write-Host "To proceed anyway, use: -SkipVersionCheck" -ForegroundColor Yellow
-            Write-Host ""
-            throw "Script version ($CurrentVersion) is newer than latest release ($latestVersion). Use -SkipVersionCheck to bypass."
-        }
-        # If equal, silently continue (versions match)
     } catch [System.Management.Automation.RuntimeException] {
         # Re-throw our intentional version mismatch error
         throw
     } catch {
-        # Silent fail for network issues or missing releases - don't block deployment
+        # Silent fail for network issues - don't block deployment if GitHub is unreachable
         # (Silently continue - no output needed)
     }
 }
@@ -600,7 +588,7 @@ function Write-DeploymentSummary {
     $configStatus = if (Test-Path "./dab-config.json") { "auto-configured" } else { "requires manual dab-config.json" }
     $configColor = if (Test-Path "./dab-config.json") { "Green" } else { "Yellow" }
     Write-Host "  DAB Config:       $configStatus" -ForegroundColor $configColor
-    Write-Host "  1. Test API: curl $ContainerUrl/api/[entity]"
+    Write-Host "  1. Test API: curl $ContainerUrl/swagger"
     Write-Host "  2. View logs: az containerapp logs show -n $Container -g $ResourceGroup --follow"
     Write-Host "  3. Cleanup:  az group delete -n $ResourceGroup -y"
     
@@ -861,7 +849,7 @@ try {
         OK $buildResult "Failed to build updated DAB image"
         
         $buildElapsed = [math]::Round(((Get-Date) - $buildStartTime).TotalSeconds, 1)
-        Write-StepStatus "" "Success" "$imageTag ($($(buildElapsed))s)"
+        Write-StepStatus "" "Success" "$imageTag ($($buildElapsed)s)"
         
         # Update container app
         Write-StepStatus "Updating container app with new image" "Started" "30s"
@@ -878,7 +866,7 @@ try {
         OK $updateResult "Failed to update container app"
         
         $updateElapsed = [math]::Round(((Get-Date) - $updateAppStartTime).TotalSeconds, 1)
-        Write-StepStatus "" "Success" "Container updated ($($(updateElapsed))s)"
+        Write-StepStatus "" "Success" "Container updated ($($updateElapsed)s)"
         
         # Wait for new revision to become ready
         Write-StepStatus "Waiting for new revision to become ready" "Started" "2min"
@@ -923,7 +911,7 @@ try {
                 $healthResponse = Invoke-RestMethod -Uri "$containerUrl/health" -TimeoutSec 10 -ErrorAction Stop
                 if ($healthResponse.status -eq "Healthy") {
                     $healthElapsed = [math]::Round(((Get-Date) - $healthCheckStartTime).TotalSeconds, 1)
-                    Write-StepStatus "" "Success" "API is healthy ($($(healthElapsed))s)"
+                    Write-StepStatus "" "Success" "API is healthy ($($healthElapsed)s)"
                     $healthCheckPassed = $true
                     break
                 }
@@ -1110,9 +1098,9 @@ try {
     $freeCheckElapsed = [math]::Round(((Get-Date) - $freeCheckStartTime).TotalSeconds, 1)
     
     if ($canUseFree) {
-        Write-StepStatus "" "Success" "Free tier available ($($(freeCheckElapsed))s)"
+        Write-StepStatus "" "Success" "Free tier available ($($freeCheckElapsed)s)"
     } else {
-        Write-StepStatus "" "Success" "Free tier unavailable, using DTU ($($(freeCheckElapsed))s)"
+        Write-StepStatus "" "Success" "Free tier unavailable, using DTU ($($freeCheckElapsed)s)"
     }
 
     if ($canUseFree) {
@@ -1152,7 +1140,7 @@ try {
     }
     
     $dbElapsed = [math]::Round(((Get-Date) - $dbStartTime).TotalSeconds, 1)
-    Write-StepStatus "" "Success" "$sqlDb ($dbType, $($(dbElapsed))s)"
+    Write-StepStatus "" "Success" "$sqlDb ($dbType, $($dbElapsed)s)"
 
     if (Test-Path $DatabasePath) {
         Write-StepStatus "Deploying database schema" "Started" "30s"
@@ -1172,7 +1160,7 @@ try {
             if ($sqlExit -eq 0) {
                 Add-Content -Path $script:CliLog -Value "[$timestamp] [OK] sqlcmd -S $sqlServerFqdn -d $sqlDb -G -i $DatabasePath`n$sqlcmdOutput`n"
                 $schemaElapsed = [math]::Round(((Get-Date) - $schemaStartTime).TotalSeconds, 1)
-                Write-StepStatus "" "Success" "schema deployed to $sqlDb ($($(schemaElapsed))s)"
+                Write-StepStatus "" "Success" "schema deployed to $sqlDb ($($schemaElapsed)s)"
                 $schemaSuccess = $true
             } else {
                 Add-Content -Path $script:CliLog -Value "[$timestamp] [ERR] sqlcmd -S $sqlServerFqdn -d $sqlDb -G -i $DatabasePath (attempt $schemaRetries/$maxSchemaRetries)`n$sqlcmdOutput`n"
@@ -1248,7 +1236,7 @@ try {
                 Add-Content -Path $script:CliLog -Value "[$timestamp] [OK] dab validate --config $ConfigPath`nConfiguration valid`n"
                 
                 $validationElapsed = [math]::Round(((Get-Date) - $validationStartTime).TotalSeconds, 1)
-                Write-StepStatus "" "Success" "$ConfigPath validated ($($(validationElapsed))s)"
+                Write-StepStatus "" "Success" "$ConfigPath validated ($($validationElapsed)s)"
             }
         } finally {
             Remove-Item Env:MSSQL_CONNECTION_STRING -ErrorAction SilentlyContinue
@@ -1280,7 +1268,7 @@ try {
     }
     
     $lawElapsed = [math]::Round(((Get-Date) - $lawStartTime).TotalSeconds, 1)
-    Write-StepStatus "" "Success" "$logAnalytics ($($(lawElapsed))s)"
+    Write-StepStatus "" "Success" "$logAnalytics ($($lawElapsed)s)"
 
     Write-StepStatus "Updating Log Analytics retention" "Started" "35s"
     $lawUpdateArgs = @('monitor', 'log-analytics', 'workspace', 'update', '--resource-group', $rg, '--workspace-name', $logAnalytics, '--tags') + $commonTagValues + @('--retention-time', $Config.LogRetentionDays.ToString())
@@ -1295,7 +1283,7 @@ try {
     $acaCreateResult = Invoke-AzCli -Arguments $acaArgs
     OK $acaCreateResult "Failed to create Container Apps environment"
     $acaElapsed = [math]::Round(((Get-Date) - $acaStartTime).TotalSeconds, 1)
-    Write-StepStatus "" "Success" "$acaEnv ($($(acaElapsed))s)"
+    Write-StepStatus "" "Success" "$acaEnv ($($acaElapsed)s)"
 
     Write-StepStatus "Creating Azure Container Registry" "Started" "25s"
     
@@ -1304,7 +1292,7 @@ try {
     $acrResult = Invoke-AzCli -Arguments $acrArgs
     OK $acrResult "Failed to create Azure Container Registry"
     $acrElapsed = [math]::Round(((Get-Date) - $acrStartTime).TotalSeconds, 1)
-    Write-StepStatus "" "Success" "$acrName ($($(acrElapsed))s)"
+    Write-StepStatus "" "Success" "$acrName ($($acrElapsed)s)"
     
     $acrLoginServerArgs = @('acr', 'show', '--resource-group', $rg, '--name', $acrName, '--query', 'loginServer', '--output', 'tsv')
     $acrLoginServerResult = Invoke-AzCli -Arguments $acrLoginServerArgs
@@ -1320,7 +1308,7 @@ try {
     $buildResult = Invoke-AzCli -Arguments $buildArgs
     OK $buildResult "Failed to build custom DAB image"
     $buildElapsed = [math]::Round(((Get-Date) - $buildStartTime).TotalSeconds, 1)
-    Write-StepStatus "" "Success" "$imageTag ($($(buildElapsed))s)"
+    Write-StepStatus "" "Success" "$imageTag ($($buildElapsed)s)"
     
     $ContainerImage = $imageTag
 
@@ -1351,7 +1339,7 @@ try {
     $createAppResult = Invoke-AzCli -Arguments $createAppArgs
     OK $createAppResult "Failed to create Container App with ACR image"
     $createAppElapsed = [math]::Round(((Get-Date) - $createAppStartTime).TotalSeconds, 1)
-    Write-StepStatus "" "Success" "$container ($($(createAppElapsed))s)"
+    Write-StepStatus "" "Success" "$container ($($createAppElapsed)s)"
     
     Write-StepStatus "Assigning AcrPull role to managed identity" "Started" "15s"
     
@@ -1492,14 +1480,14 @@ WHERE dp.name = '$escapedUserName';
             
             if ($hasExecute) {
                 $verifyElapsed = [math]::Round(((Get-Date) - $verifyStartTime).TotalSeconds, 1)
-                Write-StepStatus "" "Success" "db_datareader + db_datawriter + EXECUTE verified for $sqlUserName ($($(verifyElapsed))s)"
+                Write-StepStatus "" "Success" "db_datareader + db_datawriter + EXECUTE verified for $sqlUserName ($($verifyElapsed)s)"
             } else {
                 $verifyElapsed = [math]::Round(((Get-Date) - $verifyStartTime).TotalSeconds, 1)
-                Write-StepStatus "" "Info" "Permissions granted but verification pattern incomplete ($($(verifyElapsed))s)"
+                Write-StepStatus "" "Info" "Permissions granted but verification pattern incomplete ($($verifyElapsed)s)"
             }
         } else {
             $verifyElapsed = [math]::Round(((Get-Date) - $verifyStartTime).TotalSeconds, 1)
-            Write-StepStatus "" "Info" "Verification query failed, but grants succeeded ($($(verifyElapsed))s)"
+            Write-StepStatus "" "Info" "Verification query failed, but grants succeeded ($($verifyElapsed)s)"
         }
     } catch {
         Write-StepStatus "" "Info" "Permission verification skipped: $($_.Exception.Message)"
@@ -1518,7 +1506,7 @@ WHERE dp.name = '$escapedUserName';
     
     if ($restartResult.ExitCode -eq 0) {
         $restartElapsed = [math]::Round(((Get-Date) - $restartStartTime).TotalSeconds, 0)
-        Write-StepStatus "" "Success" "$container restarted ($($(restartElapsed))s)"
+        Write-StepStatus "" "Success" "$container restarted ($($restartElapsed)s)"
     } else {
         $restartElapsed = [math]::Round(((Get-Date) - $restartStartTime).TotalSeconds, 0)
         Write-StepStatus "" "Error" "Container failed to restart (${restartElapsed}s, exit code: $($restartResult.ExitCode))"
@@ -1562,7 +1550,7 @@ WHERE dp.name = '$escapedUserName';
                         if ($restartCount -lt 3) {
                             $containerRunning = $true
                             $verifyElapsed = [math]::Round(((Get-Date) - $verifyStartTime).TotalSeconds, 1)
-                            Write-StepStatus "" "Success" "$container running with restart count $restartCount ($($(verifyElapsed))s)"
+                            Write-StepStatus "" "Success" "$container running with restart count $restartCount ($($verifyElapsed)s)"
                         } else {
                             Write-StepStatus "" "Info" "Container in crash loop (restart count: $restartCount)"
                         }
@@ -1605,14 +1593,14 @@ WHERE dp.name = '$escapedUserName';
                 
                 if ($healthResponse.status -eq "Healthy") {
                     $healthElapsed = [math]::Round(((Get-Date) - $healthCheckStartTime).TotalSeconds, 1)
-                    Write-StepStatus "" "Success" "DAB API health: Healthy ($($(healthElapsed))s)"
+                    Write-StepStatus "" "Success" "DAB API health: Healthy ($($healthElapsed)s)"
                     $healthCheckPassed = $true
                     break
                 } elseif ($healthResponse.status -eq "Unhealthy") {
                     $dbCheck = $healthResponse.checks | Where-Object { $_.tags -contains "data-source" } | Select-Object -First 1
                     if ($dbCheck -and $dbCheck.status -eq "Healthy") {
                         $healthElapsed = [math]::Round(((Get-Date) - $healthCheckStartTime).TotalSeconds, 1)
-                        Write-StepStatus "" "Success" "DAB API responding, database connection healthy ($($(healthElapsed))s)"
+                        Write-StepStatus "" "Success" "DAB API responding, database connection healthy ($($healthElapsed)s)"
                         $healthCheckPassed = $true
                         break
                     } else {
@@ -1635,7 +1623,7 @@ WHERE dp.name = '$escapedUserName';
                     Start-Sleep -Seconds $waitBetweenRetries
                 } else {
                     $healthElapsed = [math]::Round(((Get-Date) - $healthCheckStartTime).TotalSeconds, 1)
-                    Write-StepStatus "" "Info" "Unable to verify DAB API health after $healthAttempts attempts ($($(healthElapsed))s)"
+                    Write-StepStatus "" "Info" "Unable to verify DAB API health after $healthAttempts attempts ($($healthElapsed)s)"
                     Write-Host "  Health endpoint: $healthUrl" -ForegroundColor DarkGray
                     Write-Host "  Container may still be starting - check logs if needed" -ForegroundColor DarkGray
                 }
@@ -1732,4 +1720,5 @@ Write-Host "====================================================================
 Write-Host ""
 
 exit 0
+
 
