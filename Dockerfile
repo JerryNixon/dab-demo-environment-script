@@ -1,4 +1,5 @@
-ARG DAB_VERSION=1.7.75-rc
+# Overridden by create.ps1 via --build-arg DAB_VERSION=...
+ARG DAB_VERSION=INVALID-SET-BY-CREATE
 FROM mcr.microsoft.com/azure-databases/data-api-builder:${DAB_VERSION}
 
 # redeclare ARG so it's in scope again after FROM

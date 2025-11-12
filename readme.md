@@ -1,383 +1,46 @@
-# Deploy Data API Builder to Azure Container Apps
+# Deploy Data API Builder to Azure
 
-Automated deployment of **Data API Builder (DAB)** on **Azure Container Apps (ACA)** using **Azure SQL Database** with **Entra ID authentication** and **baked-in configuration** via custom Docker image.
-
-## Quick Start
-
-### Initial Deployment
-
-Ensure these files are in your working directory:
-
-* `database.sql` - Your database schema
-* `dab-config.json` - DAB configuration
-* `Dockerfile` - Container image definition
-
-Then run:
-
-```powershell
-.\script.ps1
-```
-
-### Update Existing Deployment
-
-After modifying `dab-config.json`, update just the container image without redeploying infrastructure:
-
-```powershell
-.\script.ps1 -UpdateImage dab-demo-20251111113005
-```
-
-> **Fast Updates**: ~3 minutes vs ~8 minutes for full deployment  
-> **Safe**: Only updates container image, doesn't touch database or other infrastructure
-
-> Requires PowerShell 5.1+, Azure CLI, DAB CLI, and sqlcmd.
-
-## What Gets Deployed
-
-```
-Resource Group: dab-demo-<timestamp>
- ├─ SQL Server
- │   └─ SQL Database
- ├─ Azure Container Registry
- ├─ Azure Log Analytics Workspace
- ├─ Azure Container Apps Environment
- │   └─ Container App (runs Data API builder)
-```
-
-### Resource tags
-
-All resources are automatically tagged:
-
- - `author=dab-deploy-demo-script`
- - `owner=<your-username>`
+This script provisions everything needed to run Data API Builder (DAB) on Azure Container Apps with Azure SQL Database. Your `dab-config.json` is baked into the container image, so no secrets are stored in environment variables.
 
 ## Prerequisites
 
-* **PowerShell 5.1 or higher** [Install](https://learn.microsoft.com/en-us/powershell/scripting/install/installing-powershell-on-windows?view=powershell-7.5)
-* **Azure CLI** - [Install](https://aka.ms/installazurecliwindows)
-* **DAB CLI** - [Install](https://learn.microsoft.com/en-us/azure/data-api-builder/command-line/install)
-* **SQLCMD** - [Install](https://learn.microsoft.com/en-us/sql/tools/sqlcmd/sqlcmd-download-install?view=sql-server-ver17&tabs=windows)
-* **Contributor** or **Owner** role on target subscription
+- PowerShell 5.1 or newer
+- Azure CLI (logged in)
+- Data API Builder CLI (`dab`)
+- `sqlcmd`
+- Repo files in the working directory: `database.sql`, `dab-config.json`, `Dockerfile`
 
-> **Note**: The script is compatible with both PowerShell 5.1 and PowerShell 7+. However, PowerShell 7+ is recommended for improved performance and features.
-
-## Three required external files
-
-### `database.sql`
-Your SQL schema and optional seed data. Executed using Entra ID authentication after database creation.
-
-### `dab-config.json`
-DAB configuration file **must** reference the connection string as:
-```json
-{
-  "data-source": {
-    "database-type": "mssql",
-    "connection-string": "@env('MSSQL_CONNECTION_STRING')"
-  }
-}
-```
-
-### `Dockerfile`
-(Provided) Builds a custom image with your config baked in. 
-
-## Features
-
-- **Automatic version checking**: Notifies you when script updates are available (use `-SkipVersionCheck` to disable)
-- **Fast updates**: Update container image in ~3 minutes with `-UpdateImage`
-- **Version validation**: Ensures Azure CLI, DAB CLI, and sqlcmd meet minimum version requirements
-- Entra ID-only authentication (no SQL passwords)
-- Managed identity for database and container registry access
-- Automatic SQL permissions: db_datareader, db_datawriter, and EXECUTE (for stored procedures)
-- Permission verification to ensure managed identity has all required SQL access
-- Custom Docker image with config baked in (no secrets in environment variables)
-- Free-tier database with automatic fallback to paid tier if unavailable
-- Failed deployments auto-cleanup (or preserve with `-NoCleanup` for debugging)
-- **PowerShell 5.1+ compatibility**: Works with both Windows PowerShell and PowerShell Core
-
-## Updating Your Deployment
-
-After making changes to `dab-config.json`, you can update just the container image without redeploying the entire infrastructure:
+## Deploy
 
 ```powershell
-# Update with default config location
-.\script.ps1 -UpdateImage dab-demo-20251111113005
-
-# Update with custom config location
-.\script.ps1 -UpdateImage dab-demo-20251111113005 -ConfigPath .\configs\prod.json
-
-# Skip confirmation prompt
-.\script.ps1 -UpdateImage dab-demo-20251111113005 -Force
+# Full environment (~8 minutes)
+./create.ps1
 ```
 
-### How It Works
+## Update Only the Image
 
-1. **Discovers existing resources** using tags (`author=dab-deploy-demo-script`)
-2. **Generates config hash** to identify the new configuration
-3. **Checks for existing image** - reuses if config hasn't changed
-4. **Builds new image** with updated config in Azure Container Registry
-5. **Updates container app** with new image tag
-6. **Waits for rollout** - Azure Container Apps handles the rolling update
-7. **Verifies health** - confirms new revision is responding
+```powershell
+# Use the resource group created during deploy (~3 minutes)
+./create.ps1 -UpdateImage <resource-group-name>
+```
 
-**What gets updated:**
-- Container image with new DAB configuration
+## What Gets Created
 
-**What stays unchanged:**
-- SQL Server and database
-- Container Apps environment
+- Resource group `dab-demo-<timestamp>`
+- Azure SQL server + database (Free tier if available)
 - Azure Container Registry
+- Azure Container Apps environment + container app
 - Log Analytics workspace
-- All managed identities and permissions
 
-**Time comparison:**
-- Full deployment: ~8 minutes
-- Image update: ~3 minutes
+## Output
 
-## Version Checking
+Both deploy modes end with a concise summary that lists:
 
-The script automatically checks for updates on each run by querying the latest GitHub release. This helps ensure you're using the most current, tested version.
+- Total runtime
+- Resource group and container names
+- Image tag and config hash
+- Swagger, GraphQL, and health URLs
 
-### Behavior
+Azure validates regions and other constraints at runtime, and the update flow always preserves existing resources.
 
-| Scenario | Action |
-|----------|--------|
-| **Local = Latest** | Silent, continues normally |
-| **Local < Latest** | Shows notification with download link, continues |
-| **Local > Latest** | **Blocks execution** - prevents running unreleased/dev versions |
-| **GitHub unreachable** | Silent fallback, continues (won't block offline deployments) |
-
-### Example Output (Update Available)
-
-```
-Checking prerequisites...
-  Azure CLI: Installed (2.65.0)
-  DAB CLI: Installed (1.7.75)
-  sqlcmd: Installed (15.0.2000.5)
-  database.sql: Found
-  dab-config.json: Found
-  Dockerfile: Found
-  Config hash: a1b2c3d4
-
-NOTE: A newer version is available!
-  Current: 0.1.9
-  Latest:  0.2.0
-  URL:     https://github.com/JerryNixon/dab-demo-environment-script/releases/tag/v0.2.0
-
-To skip this check: -SkipVersionCheck
-
-Authenticating to Azure...
-```
-
-### Skipping Version Check
-
-Use `-SkipVersionCheck` to disable the check:
-
-```powershell
-# For CI/CD pipelines
-.\script.ps1 -Force -SkipVersionCheck
-
-# For offline environments
-.\script.ps1 -SkipVersionCheck
-
-# When running development versions
-.\script.ps1 -SkipVersionCheck
-```
-
-**Why skip?**
-- CI/CD pipelines with pinned script versions
-- Offline/airgapped environments without GitHub access
-- Development/testing of unreleased versions
-- Automated deployments where notifications aren't needed
-
-## Example Output
-
-```sh
-dab-deploy-demo version 0.0.1
-
-Checking prerequisites...
-  Azure CLI:   Installed (2.64.0)
-  DAB CLI:     Installed (1.2.10)
-  sqlcmd:      Installed
-  database.sql: Found
-  dab-config.json: Found
-  Dockerfile:  Found
-  Config hash: d3d294a8
-
-Authenticating to Azure...
-Azure authentication completed successfully
-
-Current subscription:
-  Name: Visual Studio Enterprise Subscription
-  ID:   12345678-1234-1234-1234-123456789abc
-
-Deploy to this subscription? (y/n/list) [y]
-
-Starting deployment. Estimated time to complete: 8m (finish ~14:38:25)
-
-Creating resource group
-[Started] (est 3s at 14:30:25)
-[Success] (dab-demo-20251107143022, 2.3s)
-
-Getting current Azure AD user
-[Started] (est 2s at 14:30:27)
-[Success] (retrieved jerry@contoso.com)
-
-Creating SQL Server
-[Started] (est 80s at 14:32:47)
-[Success] (sql-server-20251107143022, 78.4s)
-
-Creating SQL database
-[Started] (est 15s at 14:33:20)
-[Success] (sql-database, Free-tier, 14.2s)
-
-Deploying database schema
-[Started] (est 30s at 14:33:50)
-[Success] (schema deployed to sql-database, 4.2s)
-
-Validating DAB configuration
-[Started] (est 5s at 14:33:55)
-[Success] (./dab-config.json validated, 1.6s)
-
-Creating Log Analytics workspace
-[Started] (est 42s at 14:34:37)
-[Success] (log-workspace-20251107143022, 38.3s)
-
-Creating Container Apps environment
-[Started] (est 136s at 14:36:53)
-[Success] (aca-environment-20251107143022, 134.2s)
-
-Creating Azure Container Registry
-[Started] (est 30s at 14:37:23)
-[Success] (acr20251107143022, 29.4s)
-
-Building custom DAB image with baked config
-[Started] (est 90s at 14:38:53)
-[Success] (acr20251107143022.azurecr.io/dab-baked:d3d294a8, 87.6s)
-
-Creating Container App with managed identity
-[Started] (est 60s at 14:39:53)
-[Success] (data-api-container, 58.3s)
-
-Assigning AcrPull role to managed identity
-[Started] (est 15s at 14:40:08)
-[Success] (AcrPull role assigned to data-api-container MI)
-
-Retrieving managed identity display name
-[Started] (est 3min at 14:43:08)
-[Success] (Retrieved: data-api-container)
-
-Granting managed identity access to SQL Database
-[Started] (est 10s at 14:44:38)
-[Success] (data-api-container granted access to sql-database, 45.2s)
-
-Verifying SQL permissions
-[Started] (est 3s at 14:45:23)
-[Success] (Permissions verified: db_datareader, db_datawriter, EXECUTE, 2.1s)
-
-Restarting container to activate managed identity
-[Started] (est 15s at 14:45:26)
-[Success] (data-api-container restarted, 12.4s)
-
-Verifying container is running
-[Started] (est 5min at 14:45:38)
-[Success] (data-api-container running, restart count: 0)
-
-Checking DAB API health endpoint
-[Started] (est 1min at 14:50:38)
-[Success] (DAB API health: Healthy)
-
-==============================================================================
-  DAB DEMO DEPLOYMENT SUMMARY
-==============================================================================
-
-RESOURCES
-  Resource Group:    dab-demo-20251106143022
-  Region:            westus2
-  Total Time:        12.5m
-
-  SQL Server:        sql-server-20251106143022
-    Database:        sql-database (Free-tier)
-    Admin:           jerry@contoso.com
-
-  Container App:     data-api-container
-    Environment:     aca-environment-20251106143022
-    Identity:        System-assigned managed identity
-
-  Log Analytics:     log-workspace-20251106143022
-
-ENDPOINTS
-  DAB API:          https://data-api-container...
-  SQL Server:       sql-server-20251106143022.database.windows.net
-  Portal RG:        https://portal.azure.com/...
-  Portal SQL:       https://portal.azure.com/...
-  Portal Container: https://portal.azure.com/...
-  Portal Logs:      https://portal.azure.com/...
-  Logs (CLI):       az containerapp logs show -n data-api-container -g dab-demo-20251106143022 --follow
-```
-
-## Script Parameters
-
-### Deployment Mode
-
-```powershell
-.\script.ps1 [options]
-```
-
-| Parameter | Description | Default |
-|-----------|-------------|---------|
-| `-Region` | Azure region for deployment | `westus2` |
-| `-DatabasePath` | Path to SQL database file | `./database.sql` |
-| `-ConfigPath` | Path to DAB config file | `./dab-config.json` |
-| `-Force` | Skip subscription confirmation | `false` |
-| `-NoCleanup` | Preserve resources on failure (for debugging) | `false` |
-| `-VerifyAdOnlyAuth` | Verify Azure AD-only auth is active (adds ~3min) | `false` |
-| `-SkipVersionCheck` | Skip checking for script updates | `false` |
-
-**Examples:**
-```powershell
-# Default deployment
-.\script.ps1
-
-# Custom region
-.\script.ps1 -Region eastus
-
-# Custom paths
-.\script.ps1 -DatabasePath .\db\schema.sql -ConfigPath .\config\prod.json
-
-# Skip confirmation (for CI/CD)
-.\script.ps1 -Force
-
-# Keep resources on failure
-.\script.ps1 -NoCleanup
-
-# Skip version check (for offline use or CI/CD)
-.\script.ps1 -SkipVersionCheck
-```
-
-### Update Mode
-
-```powershell
-.\script.ps1 -UpdateImage <resource-group-name> [options]
-```
-
-| Parameter | Description | Default |
-|-----------|-------------|---------|
-| `-UpdateImage` | Resource group name of existing deployment | Required |
-| `-ConfigPath` | Path to updated DAB config file | `./dab-config.json` |
-| `-Force` | Skip subscription confirmation | `false` |
-| `-SkipVersionCheck` | Skip checking for script updates | `false` |
-
-**Examples:**
-```powershell
-# Update with default config
-.\script.ps1 -UpdateImage dab-demo-20251111113005
-
-# Update with custom config
-.\script.ps1 -UpdateImage dab-demo-20251111113005 -ConfigPath .\config\prod-v2.json
-
-# Skip confirmation
-.\script.ps1 -UpdateImage dab-demo-20251111113005 -Force
-
-# Skip version check (for CI/CD)
-.\script.ps1 -UpdateImage dab-demo-20251111113005 -SkipVersionCheck
-```
 
