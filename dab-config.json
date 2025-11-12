@@ -423,7 +423,7 @@
         "enabled": true,
         "path": "/GetSeriesActors",
         "methods": [
-          "post"
+          "get"
         ]
       },
       "permissions": [

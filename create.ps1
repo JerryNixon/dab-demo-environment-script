@@ -204,7 +204,8 @@ if (-not (Get-Command dab -ErrorAction SilentlyContinue)) {
                 Write-Host ""
                 Write-Host "Please update DAB CLI:" -ForegroundColor Yellow
                 Write-Host "  dotnet tool update -g Microsoft.DataApiBuilder" -ForegroundColor White
-                throw "DAB CLI version $dabVersion is too old (requires $MinimumDabVersion+)"
+                Write-Host ""
+                exit 1
             }
             
             Write-Host "Installed ($dabVersion)" -ForegroundColor Green
@@ -216,6 +217,7 @@ if (-not (Get-Command dab -ErrorAction SilentlyContinue)) {
             Write-Host "If deployment fails, update DAB: dotnet tool update -g Microsoft.DataApiBuilder" -ForegroundColor White
         }
     } catch {
+        Write-Host "  DAB CLI: " -NoNewline -ForegroundColor Yellow
         Write-Host "Installed (version check failed)" -ForegroundColor Yellow
     }
 }
@@ -398,7 +400,6 @@ try {
     Write-Host "Please ensure you have access to an Azure subscription and try again." -ForegroundColor Yellow
     throw "Azure authentication failed: $($_.Exception.Message)"
 }
-Write-Host ""
 
 $tenantId = az account show --query tenantId -o tsv
 $subscriptionId = az account show --query id -o tsv
@@ -730,13 +731,15 @@ try {
         
         $estimatedFinishTime = (Get-Date).AddMinutes(3).ToString("HH:mm:ss")
         Write-Host "Starting image update. Estimated time to complete: 3m (finish ~$estimatedFinishTime)" -ForegroundColor Cyan
-        Write-Host ""
         
         # Verify resource group exists
         Write-StepStatus "Verifying resource group" "Started" "5s"
         $rgCheckResult = Invoke-AzCli -Arguments @('group', 'exists', '--name', $rg)
         if ($rgCheckResult.TrimmedText -ne 'true') {
-            throw "Resource group '$rg' does not exist. Cannot update."
+            Write-Host ""
+            Write-Host "ERROR: Resource group '$rg' does not exist" -ForegroundColor Red
+            Write-Host ""
+            exit 1
         }
         Write-StepStatus "" "Success" "Resource group exists"
         
@@ -746,7 +749,10 @@ try {
         # Find ACR
         $acrListResult = Invoke-AzCli -Arguments @('acr', 'list', '--resource-group', $rg, '--query', "[?tags.author=='dab-deploy-demo-script'].name", '--output', 'tsv')
         if ([string]::IsNullOrWhiteSpace($acrListResult.TrimmedText)) {
-            throw "No ACR found in resource group '$rg' with expected tags (author=dab-deploy-demo-script)"
+            Write-Host ""
+            Write-Host "ERROR: Azure Container Registry not found in '$rg'" -ForegroundColor Red
+            Write-Host ""
+            exit 1
         }
         $acrName = $acrListResult.TrimmedText.Trim()
         Write-Host "  Found ACR: $acrName" -ForegroundColor Gray
@@ -759,7 +765,10 @@ try {
         # Find Container App
         $containerListResult = Invoke-AzCli -Arguments @('containerapp', 'list', '--resource-group', $rg, '--query', "[?tags.author=='dab-deploy-demo-script'].name", '--output', 'tsv', '--only-show-errors')
         if ([string]::IsNullOrWhiteSpace($containerListResult.TrimmedText)) {
-            throw "No Container App found in resource group '$rg' with expected tags (author=dab-deploy-demo-script)"
+            Write-Host ""
+            Write-Host "ERROR: Container App not found in '$rg'" -ForegroundColor Red
+            Write-Host ""
+            exit 1
         }
         $container = $containerListResult.TrimmedText.Trim()
         Write-Host "  Found Container App: $container" -ForegroundColor Gray
@@ -773,28 +782,27 @@ try {
         # Check if image with same hash already exists
         $imageTag = "$acrLoginServer/dab-baked:$configHash"
         $existingTagsResult = Invoke-AzCli -Arguments @('acr', 'repository', 'show-tags', '--name', $acrName, '--repository', 'dab-baked', '--output', 'json')
+        $skipBuild = $false
         if ($existingTagsResult.ExitCode -eq 0) {
             $existingTags = $existingTagsResult.TrimmedText | ConvertFrom-Json
             if ($existingTags -contains $configHash) {
-                Write-Host "`n  Image with this config already exists in ACR" -ForegroundColor Yellow
-                $response = Read-Host "  Continue with existing image? (y/n) [y]"
-                if ($response -and $response -ne 'y') {
-                    Write-Host "`nUpdate cancelled by user." -ForegroundColor Yellow
-                    exit 0
-                }
+                Write-Host "  Image with this config already exists - skipping build" -ForegroundColor Gray
+                $skipBuild = $true
             }
         }
         
-        # Build new image
-        Write-StepStatus "Building updated DAB image" "Started" "40s"
-        $buildStartTime = Get-Date
-        
-        $buildArgs = @('acr', 'build', '--resource-group', $rg, '--registry', $acrName, '--image', $imageTag, '--file', 'Dockerfile', '.')
-        $buildResult = Invoke-AzCli -Arguments $buildArgs
-        OK $buildResult "Failed to build updated DAB image"
-        
-        $buildElapsed = [math]::Round(((Get-Date) - $buildStartTime).TotalSeconds, 1)
-        Write-StepStatus "" "Success" "$imageTag ($($buildElapsed)s)"
+        # Build new image (if needed)
+        if (-not $skipBuild) {
+            Write-StepStatus "Building updated DAB image" "Started" "40s"
+            $buildStartTime = Get-Date
+            
+            $buildArgs = @('acr', 'build', '--resource-group', $rg, '--registry', $acrName, '--image', $imageTag, '--file', 'Dockerfile', '.')
+            $buildResult = Invoke-AzCli -Arguments $buildArgs
+            OK $buildResult "Failed to build updated DAB image"
+            
+            $buildElapsed = [math]::Round(((Get-Date) - $buildStartTime).TotalSeconds, 1)
+            Write-StepStatus "" "Success" "$imageTag ($($buildElapsed)s)"
+        }
         
         # Update container app
         Write-StepStatus "Updating container app with new image" "Started" "30s"
@@ -1627,7 +1635,14 @@ WHERE dp.name = '$escapedUserName';
 } catch {
     Write-Host "`n"
     Write-Host ("=" * 85) -ForegroundColor Red
-    Write-Host "DEPLOYMENT FAILED - ROLLING BACK" -ForegroundColor Red -BackgroundColor Black
+    
+    # Show appropriate header based on mode
+    if ($PSCmdlet.ParameterSetName -eq 'UpdateImage') {
+        Write-Host "UPDATE FAILED" -ForegroundColor Red -BackgroundColor Black
+    } else {
+        Write-Host "DEPLOYMENT FAILED - ROLLING BACK" -ForegroundColor Red -BackgroundColor Black
+    }
+    
     Write-Host ("=" * 85) -ForegroundColor Red
     
     $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
@@ -1656,11 +1671,11 @@ WHERE dp.name = '$escapedUserName';
     }
     
     Write-Host "`nDeployment log available at: $script:CliLog" -ForegroundColor Cyan
+    Write-Host "`nScript completed at $(Get-Date -Format 'HH:mm:ss')" -ForegroundColor Cyan
     
-    throw
+    exit 1
 } finally {
     $ErrorActionPreference = 'Continue'
-    Write-Host "`nScript completed at $(Get-Date -Format 'HH:mm:ss')" -ForegroundColor Cyan
 }
 
 Write-Host "`n================================================================================" -ForegroundColor Green
