@@ -376,13 +376,11 @@
         "parameters": [
           {
             "name": "seriesId",
-            "required": false,
-            "default": "number"
+            "required": false
           },
           {
             "name": "top",
-            "required": false,
-            "default": "number"
+            "required": false
           }
         ]
       },
