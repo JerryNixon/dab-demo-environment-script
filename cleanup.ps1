@@ -1,7 +1,7 @@
 # cleanup.ps1
 # 
 # Deletes resource groups created by dab-deploy-demo script
-# Uses the 'author=dab-deploy-demo-script' tag to identify them
+# Uses the 'author=dab-demo' tag to identify them
 #
 # Parameters:
 #   -WhatIf: Show what would be deleted without actually deleting
@@ -48,18 +48,36 @@ Write-Host "Current user:         $currentUser" -ForegroundColor Green
 Write-Host ""
 
 # Find resource groups with the author tag
-Write-Host "Searching for dab-deploy-demo resource groups..." -ForegroundColor Cyan
-$rgsJson = az group list --tag author=dab-deploy-demo-script --output json 2>&1
+Write-Host "Searching for dab-demo resource groups..." -ForegroundColor Cyan
+$newGroupsJson = az group list --tag author=dab-demo --output json 2>&1
 if ($LASTEXITCODE -ne 0) {
     Write-Host "ERROR: Failed to list resource groups" -ForegroundColor Red
-    Write-Host $rgsJson -ForegroundColor DarkRed
+    Write-Host $newGroupsJson -ForegroundColor DarkRed
     exit 1
 }
 
-$resourceGroups = $rgsJson | ConvertFrom-Json
+$resourceGroups = @()
+$newGroups = if ($newGroupsJson.Trim()) { $newGroupsJson | ConvertFrom-Json } else { @() }
+if ($newGroups) { $resourceGroups += $newGroups }
+
+# Include legacy groups created before the author tag rename (dab-deploy-demo-script)
+$legacyGroupsJson = az group list --tag author=dab-deploy-demo-script --output json 2>&1
+if ($LASTEXITCODE -eq 0 -and $legacyGroupsJson.Trim()) {
+    $legacyGroups = $legacyGroupsJson | ConvertFrom-Json
+    $legacyAdded = 0
+    foreach ($legacy in $legacyGroups) {
+        if (-not ($resourceGroups | Where-Object { $_.name -eq $legacy.name })) {
+            $resourceGroups += $legacy
+            $legacyAdded++
+        }
+    }
+    if ($legacyAdded -gt 0) {
+        Write-Host "Including $legacyAdded legacy resource group(s) tagged with author=dab-deploy-demo-script" -ForegroundColor DarkGray
+    }
+}
 
 if ($resourceGroups.Count -eq 0) {
-    Write-Host "No resource groups found with tag 'author=dab-deploy-demo-script'" -ForegroundColor Yellow
+    Write-Host "No resource groups found with tags 'author=dab-demo' or 'author=dab-deploy-demo-script'" -ForegroundColor Yellow
     Write-Host ""
     Write-Host "Nothing to clean up!" -ForegroundColor Green
     exit 0
@@ -260,7 +278,7 @@ if ($successCount -gt 0) {
     Write-Host "NOTE: Deletions are running in the background." -ForegroundColor Yellow
     Write-Host "It may take several minutes for resources to be fully deleted." -ForegroundColor Yellow
     Write-Host ""
-    Write-Host "Check status: az group list --tag author=dab-deploy-demo-script --output table" -ForegroundColor Cyan
+    Write-Host "Check status: az group list --tag author=dab-demo --output table" -ForegroundColor Cyan
 }
 
 if ($failCount -gt 0) {

@@ -24,6 +24,8 @@ This script provisions everything needed to run Data API Builder (DAB) on Azure 
 ./create.ps1 -UpdateImage <resource-group-name>
 ```
 
+Every update run pushes a fresh image tagged with the current timestamp, even when `dab-config.json` is unchanged.
+
 ## What Gets Created
 
 - Resource group `dab-demo-<timestamp>`
@@ -38,7 +40,7 @@ Both deploy modes end with a concise summary that lists:
 
 - Total runtime
 - Resource group and container names
-- Image tag and config hash
+- Image tag (timestamp-based)
 - Swagger, GraphQL, and health URLs
 
 Azure validates regions and other constraints at runtime, and the update flow always preserves existing resources.

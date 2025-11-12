@@ -46,7 +46,7 @@ param(
     [switch]$SkipVersionCheck
 )
 
-$ScriptVersion = "0.2.4"
+$ScriptVersion = "0.2.5"
 $MinimumDabVersion = "1.7.81-rc"  # Minimum required DAB CLI version (note: comparison strips -rc suffix)
 $DockerDabVersion = $MinimumDabVersion   # DAB container image tag to bake into ACR build
 
@@ -356,9 +356,8 @@ if (-not (Test-Path $dockerfilePath)) {
 Write-Host "  Dockerfile: " -NoNewline -ForegroundColor Yellow
 Write-Host "Found" -ForegroundColor Green
 
-$configHash = (Get-FileHash $ConfigPath -Algorithm SHA256).Hash.Substring(0,8).ToLower()
-Write-Host "  Config hash: " -NoNewline -ForegroundColor Yellow
-Write-Host $configHash -ForegroundColor Green
+Write-Host "  Build tag: " -NoNewline -ForegroundColor Yellow
+Write-Host $runTimestamp -ForegroundColor Green
 
 Write-Host ""
 
@@ -381,7 +380,6 @@ try {
     throw "Azure authentication failed: $($_.Exception.Message)"
 }
 
-$tenantId = az account show --query tenantId -o tsv
 $subscriptionId = az account show --query id -o tsv
 
 function Wait-Seconds {
@@ -692,7 +690,7 @@ try {
         Write-StepStatus "Discovering existing resources" "Started" "5s"
         
         # Find ACR
-        $acrListResult = Invoke-AzCli -Arguments @('acr', 'list', '--resource-group', $rg, '--query', "[?tags.author=='dab-deploy-demo-script'].name", '--output', 'tsv')
+    $acrListResult = Invoke-AzCli -Arguments @('acr', 'list', '--resource-group', $rg, '--query', "[?tags.author=='dab-demo' || tags.author=='dab-deploy-demo-script'].name", '--output', 'tsv')
         if ([string]::IsNullOrWhiteSpace($acrListResult.TrimmedText)) {
             Write-Host ""
             Write-Host "ERROR: Azure Container Registry not found in '$rg'" -ForegroundColor Red
@@ -708,7 +706,7 @@ try {
         $acrLoginServer = $acrLoginServerResult.TrimmedText
         
         # Find Container App
-        $containerListResult = Invoke-AzCli -Arguments @('containerapp', 'list', '--resource-group', $rg, '--query', "[?tags.author=='dab-deploy-demo-script'].name", '--output', 'tsv', '--only-show-errors')
+    $containerListResult = Invoke-AzCli -Arguments @('containerapp', 'list', '--resource-group', $rg, '--query', "[?tags.author=='dab-demo' || tags.author=='dab-deploy-demo-script'].name", '--output', 'tsv', '--only-show-errors')
         if ([string]::IsNullOrWhiteSpace($containerListResult.TrimmedText)) {
             Write-Host ""
             Write-Host "ERROR: Container App not found in '$rg'" -ForegroundColor Red
@@ -720,42 +718,27 @@ try {
         
         Write-StepStatus "" "Success" "Resources discovered"
         
-        # Generate config hash
-        $configHash = (Get-FileHash $ConfigPath -Algorithm SHA256).Hash.Substring(0,8).ToLower()
-        Write-Host "  New config hash: $configHash" -ForegroundColor Gray
+        # Compose new timestamp-based image tag
+        $imageTag = "$acrLoginServer/dab-baked:$runTimestamp"
+        Write-Host "  New image tag: $imageTag" -ForegroundColor Gray
         
-        # Check if image with same hash already exists
-        $imageTag = "$acrLoginServer/dab-baked:$configHash"
-        $existingTagsResult = Invoke-AzCli -Arguments @('acr', 'repository', 'show-tags', '--name', $acrName, '--repository', 'dab-baked', '--output', 'json')
-        $skipBuild = $false
-        if ($existingTagsResult.ExitCode -eq 0) {
-            $existingTags = $existingTagsResult.TrimmedText | ConvertFrom-Json
-            if ($existingTags -contains $configHash) {
-                Write-Host "  Image with this config already exists - skipping build" -ForegroundColor Gray
-                $skipBuild = $true
-            }
-        }
+        Write-StepStatus "Building updated DAB image" "Started" "40s"
+        $buildStartTime = Get-Date
         
-        # Build new image (if needed)
-        if (-not $skipBuild) {
-            Write-StepStatus "Building updated DAB image" "Started" "40s"
-            $buildStartTime = Get-Date
-            
-            $buildArgs = @(
-                'acr', 'build',
-                '--resource-group', $rg,
-                '--registry', $acrName,
-                '--image', $imageTag,
-                '--file', 'Dockerfile',
-                '--build-arg', "DAB_VERSION=$DockerDabVersion",
-                '.'
-            )
-            $buildResult = Invoke-AzCli -Arguments $buildArgs
-            OK $buildResult "Failed to build updated DAB image"
-            
-            $buildElapsed = [math]::Round(((Get-Date) - $buildStartTime).TotalSeconds, 1)
-            Write-StepStatus "" "Success" "$imageTag ($($buildElapsed)`s)"
-        }
+        $buildArgs = @(
+            'acr', 'build',
+            '--resource-group', $rg,
+            '--registry', $acrName,
+            '--image', $imageTag,
+            '--file', 'Dockerfile',
+            '--build-arg', "DAB_VERSION=$DockerDabVersion",
+            '.'
+        )
+        $buildResult = Invoke-AzCli -Arguments $buildArgs
+        OK $buildResult "Failed to build updated DAB image"
+        
+        $buildElapsed = [math]::Round(((Get-Date) - $buildStartTime).TotalSeconds, 1)
+        Write-StepStatus "" "Success" "$imageTag ($($buildElapsed)`s)"
         
         # Update container app
         Write-StepStatus "Updating container app with new image" "Started" "30s"
@@ -772,7 +755,7 @@ try {
         OK $updateResult "Failed to update container app"
         
         $updateElapsed = [math]::Round(((Get-Date) - $updateAppStartTime).TotalSeconds, 1)
-    Write-StepStatus "" "Success" "Container updated ($($updateElapsed)`s)"
+        Write-StepStatus "" "Success" "Container updated ($($updateElapsed)`s)"
         
         # Wait for new revision to become ready
         Write-StepStatus "Waiting for new revision to become ready" "Started" "2min"
@@ -845,8 +828,8 @@ try {
         Write-Host "  API Endpoint:      $containerUrl" -ForegroundColor White
         Write-Host ""
         Write-Host "UPDATE INFO" -ForegroundColor Magenta
-        Write-Host "  Total time:        ${totalTime}m" -ForegroundColor White
-        Write-Host "  Config hash:       $configHash" -ForegroundColor White
+    Write-Host "  Total time:        ${totalTime}m" -ForegroundColor White
+    Write-Host "  Build tag:         $runTimestamp" -ForegroundColor White
         Write-Host "  Health check:      $(if ($healthCheckPassed) { 'Passed' } else { 'Skipped' })" -ForegroundColor White
         Write-Host ""
         Write-Host "================================================================================" -ForegroundColor Green
@@ -1207,7 +1190,7 @@ try {
     
     Write-StepStatus "Building custom DAB image with baked config" "Started" "40s"
     
-    $imageTag = "$acrLoginServer/dab-baked:$configHash"
+    $imageTag = "$acrLoginServer/dab-baked:$runTimestamp"
     
     $buildStartTime = Get-Date
     $buildArgs = @(
@@ -1580,7 +1563,7 @@ WHERE dp.name = '$escapedUserName';
         DeploymentTime = $totalTimeFormatted
         CurrentUser = $currentUserName
         Tags = @{
-            author = 'dab-deploy-demo-script'
+            author = 'dab-demo'
             version = $ScriptVersion
             owner = $ownerTagValue
         }
