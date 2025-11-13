@@ -206,40 +206,15 @@ if (-not (Get-Command sqlcmd -ErrorAction SilentlyContinue)) {
     Write-Host "  sqlcmd: " -NoNewline -ForegroundColor Yellow
     Write-Host "Not installed" -ForegroundColor Red
     Write-Host ""
-    Write-Host "Attempting to install SQL Server command-line tools via winget..." -ForegroundColor Cyan
-    
-    if (Get-Command winget -ErrorAction SilentlyContinue) {
-        try {
-            winget install Microsoft.SqlServer.2022.CU --silent --accept-package-agreements --accept-source-agreements 2>&1 | Out-Null
-            
-            $env:Path = [System.Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path", "User")
-            
-            if (Get-Command sqlcmd -ErrorAction SilentlyContinue) {
-                Write-Host "  sqlcmd: " -NoNewline -ForegroundColor Yellow
-                Write-Host "Installed successfully" -ForegroundColor Green
-            } else {
-                throw "sqlcmd not found in PATH after installation"
-            }
-        } catch {
-            Write-Host "  Automatic installation failed" -ForegroundColor Red
-            Write-Host ""
-            Write-Host "Please install SQL Server command-line tools manually:" -ForegroundColor Yellow
-            Write-Host "  Download from: https://aka.ms/ssmsfullsetup" -ForegroundColor White
-            Write-Host "  Or use: winget install Microsoft.SqlServer.2022.CU" -ForegroundColor White
-            Write-Host ""
-            Write-Host "After installation, restart your terminal and run this script again." -ForegroundColor White
-            throw "sqlcmd installation failed: $($_.Exception.Message)"
-        }
-    } else {
-        Write-Host "  winget not available for automatic installation" -ForegroundColor Yellow
-        Write-Host ""
-        Write-Host "Please install SQL Server command-line tools manually:" -ForegroundColor Yellow
-        Write-Host "  Download from: https://aka.ms/ssmsfullsetup" -ForegroundColor White
-        Write-Host "  Or install winget, then use: winget install Microsoft.SqlServer.2022.CU" -ForegroundColor White
-        Write-Host ""
-        Write-Host "After installation, restart your terminal and run this script again." -ForegroundColor White
-        throw "sqlcmd is not installed and winget is not available for automatic installation"
-    }
+    Write-Host "ERROR: sqlcmd is required but not installed." -ForegroundColor Red
+    Write-Host ""
+    Write-Host "Please install SQL Server command-line tools:" -ForegroundColor Yellow
+    Write-Host "  Windows: https://aka.ms/ssmsfullsetup" -ForegroundColor White
+    Write-Host "  macOS:   brew install sqlcmd" -ForegroundColor White
+    Write-Host "  Linux:   https://learn.microsoft.com/sql/linux/sql-server-linux-setup-tools" -ForegroundColor White
+    Write-Host ""
+    Write-Host "After installation, restart your terminal and run this script again." -ForegroundColor White
+    throw "sqlcmd is not installed"
 } else {
     Write-Host "  sqlcmd: " -NoNewline -ForegroundColor Yellow
     try {
@@ -257,8 +232,9 @@ if (-not (Get-Command sqlcmd -ErrorAction SilentlyContinue)) {
                 Write-Host "Minimum required version: 13.1.0.0" -ForegroundColor Yellow
                 Write-Host ""
                 Write-Host "Please update sqlcmd:" -ForegroundColor Yellow
-                Write-Host "  Download from: https://aka.ms/ssmsfullsetup" -ForegroundColor White
-                Write-Host "  Or use: winget install Microsoft.SqlServer.2022.CU" -ForegroundColor White
+                Write-Host "  Windows: https://aka.ms/ssmsfullsetup" -ForegroundColor White
+                Write-Host "  macOS:   brew upgrade sqlcmd" -ForegroundColor White
+                Write-Host "  Linux:   https://learn.microsoft.com/sql/linux/sql-server-linux-setup-tools" -ForegroundColor White
                 throw "sqlcmd version $sqlcmdVersion is too old (requires 13.1+)"
             }
             
@@ -758,7 +734,7 @@ try {
         Write-StepStatus "" "Success" "Container updated ($($updateElapsed)`s)"
         
         # Wait for new revision to become ready
-        Write-StepStatus "Waiting for new revision to become ready" "Started" "2min"
+        Write-StepStatus "Waiting for new revision to become ready" "Started" "120s"
         
         $maxWaitMinutes = 2
         $checkDeadline = (Get-Date).AddMinutes($maxWaitMinutes)
@@ -888,7 +864,7 @@ try {
     $currentUserName = $userInfo.upn
     Write-StepStatus "" "Success" "retrieved $currentUserName"
 
-    Write-StepStatus "Creating SQL Server" "Started" "1min 20s"
+    Write-StepStatus "Creating SQL Server" "Started" "80s"
     
     $sqlStartTime = Get-Date
     $sqlServerArgs = @(
@@ -939,7 +915,7 @@ try {
     OK $firewallResult "Failed to create firewall rule"
 
     if ($VerifyAdOnlyAuth) {
-        Write-StepStatus "Verifying Entra ID-only authentication (optional check)" "Started" "3min"
+        Write-StepStatus "Verifying Entra ID-only authentication (optional check)" "Started" "180s"
         $adOnlyReady = $false
         
         for ($i = 1; $i -le 10; $i++) {
@@ -995,7 +971,7 @@ try {
     if ($canUseFree) {
         Write-StepStatus "Creating SQL database" "Started" "20s"
     } else {
-        Write-StepStatus "Creating SQL database" "Started" "1min"
+        Write-StepStatus "Creating SQL database" "Started" "60s"
     }
     
     $dbStartTime = Get-Date
@@ -1165,7 +1141,7 @@ try {
     OK $lawUpdateResult "Failed to update Log Analytics retention"
     Write-StepStatus "" "Success" "retention set to $($Config.LogRetentionDays) days"
 
-    Write-StepStatus "Creating Container Apps environment" "Started" "2min"
+    Write-StepStatus "Creating Container Apps environment" "Started" "120s"
     
     $acaStartTime = Get-Date
     $acaArgs = @('containerapp', 'env', 'create', '--name', $acaEnv, '--resource-group', $rg, '--location', $Region, '--logs-workspace-id', $lawCustomerId, '--logs-workspace-key', $lawPrimaryKey, '--tags') + $commonTagValues
@@ -1209,10 +1185,12 @@ try {
     
     $ContainerImage = $imageTag
 
-    Write-StepStatus "Creating Container App with managed identity" "Started" "50s"
+    Write-StepStatus "Creating Container App with managed identity" "Started" "30s"
     
     $connectionString = "Server=tcp:${sqlServerFqdn},1433;Database=${sqlDb};Authentication=Active Directory Managed Identity;"
     
+    # Create container app with a public placeholder image to establish the managed identity
+    # We'll update it with the ACR image after assigning AcrPull role
     $createAppStartTime = Get-Date
     $createAppArgs = @(
         'containerapp', 'create',
@@ -1220,11 +1198,9 @@ try {
         '--resource-group', $rg,
         '--environment', $acaEnv,
         '--system-assigned',
-        '--registry-server', $acrLoginServer,
-        '--registry-identity', 'system',
         '--ingress', 'external',
         '--target-port', '5000',
-        '--image', $ContainerImage,
+        '--image', 'mcr.microsoft.com/azuredocs/containerapps-helloworld:latest',
         '--cpu', $Config.ContainerCpu,
         '--memory', $Config.ContainerMemory,
         '--env-vars',
@@ -1234,9 +1210,9 @@ try {
     ) + $commonTagValues
     
     $createAppResult = Invoke-AzCli -Arguments $createAppArgs
-    OK $createAppResult "Failed to create Container App with ACR image"
+    OK $createAppResult "Failed to create Container App"
     $createAppElapsed = [math]::Round(((Get-Date) - $createAppStartTime).TotalSeconds, 1)
-    Write-StepStatus "" "Success" "$container ($($createAppElapsed)`s)"
+    Write-StepStatus "" "Success" "$container created with placeholder image ($($createAppElapsed)`s)"
     
     Write-StepStatus "Assigning AcrPull role to managed identity" "Started" "15s"
     
@@ -1263,6 +1239,44 @@ try {
     $roleAssignResult = Invoke-AzCli -Arguments $roleAssignArgs
     OK $roleAssignResult "Failed to assign AcrPull role"
     Write-StepStatus "" "Success" "AcrPull role assigned to $container MI"
+
+    Write-StepStatus "Waiting for RBAC propagation" "Started" "10s"
+    Start-Sleep -Seconds 10
+    Write-StepStatus "" "Success" "RBAC propagation complete"
+
+    Write-StepStatus "Configuring Container App registry for ACR" "Started" "20s"
+    
+    $registrySetArgs = @(
+        'containerapp', 'registry', 'set',
+        '--name', $container,
+        '--resource-group', $rg,
+        '--server', $acrLoginServer,
+        '--identity', 'system'
+    )
+    
+    $registrySetResult = Invoke-AzCli -Arguments $registrySetArgs
+    OK $registrySetResult "Failed to configure ACR with managed identity"
+    Write-StepStatus "" "Success" "Registry configured for $acrLoginServer using system-assigned identity"
+
+    Write-StepStatus "Updating Container App with ACR image" "Started" "40s"
+    
+    # Now update the container app to use the real ACR image - registry credentials are already configured
+    $updateAppStartTime = Get-Date
+    $updateAppArgs = @(
+        'containerapp', 'update',
+        '--name', $container,
+        '--resource-group', $rg,
+        '--image', $ContainerImage,
+        '--set-env-vars',
+        "MSSQL_CONNECTION_STRING=$connectionString",
+        "Runtime__ConfigFile=/App/dab-config.json"
+    )
+    
+    $updateAppResult = Invoke-AzCli -Arguments $updateAppArgs
+    OK $updateAppResult "Failed to update Container App with ACR image"
+    
+    $updateAppElapsed = [math]::Round(((Get-Date) - $updateAppStartTime).TotalSeconds, 1)
+    Write-StepStatus "" "Success" "Container App updated with $ContainerImage ($($updateAppElapsed)`s)"
 
     Write-StepStatus "Retrieving managed identity display name" "Started" "5s"
     
@@ -1410,7 +1424,7 @@ WHERE dp.name = '$escapedUserName';
         throw "Failed to restart container: $($restartResult.Text)"
     }
     
-    Write-StepStatus "Verifying container is running" "Started" "5min"
+    Write-StepStatus "Verifying container is running" "Started" "300s"
     $containerRunning = $false
     $maxWaitMinutes = 5
     $checkDeadline = (Get-Date).AddMinutes($maxWaitMinutes)
@@ -1472,7 +1486,7 @@ WHERE dp.name = '$escapedUserName';
         $cleanFqdn = $cleanFqdn.Trim()
         $containerUrl = "https://$cleanFqdn"
         
-        Write-StepStatus "Checking DAB API health endpoint" "Started" "2min"
+        Write-StepStatus "Checking DAB API health endpoint" "Started" "120s"
         $healthCheckStartTime = Get-Date
         
         # Give container time to stabilize after restart
