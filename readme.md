@@ -77,3 +77,193 @@ Deletes DAB resource groups created by create.ps1. The cleanup script finds reso
 ./cleanup.ps1 -Force
 ```
 
+## Reference: create script summary
+
+```sh
+az group create \
+  --name "$rg" \
+  --location "$region" \
+  --tags author=dab-demo version=0.3.1 owner="$owner"
+
+az ad signed-in-user show \
+  --query "{id:id,upn:userPrincipalName}"
+
+az sql server create \
+  --name "$sqlServer" \
+  --resource-group "$rg" \
+  --location "$region" \
+  --enable-ad-only-auth \
+  --external-admin-principal-type User \
+  --external-admin-name "$currentUser" \
+  --external-admin-sid "$userId"
+
+az sql server update \
+  --name "$sqlServer" \
+  --resource-group "$rg" \
+  --set tags.author=dab-demo tags.version=0.3.1 tags.owner="$owner"
+
+az sql server show \
+  --name "$sqlServer" \
+  --resource-group "$rg" \
+  --query fullyQualifiedDomainName
+
+az sql server firewall-rule create \
+  --resource-group "$rg" \
+  --server "$sqlServer" \
+  --name AllowAll \
+  --start-ip-address 0.0.0.0 \
+  --end-ip-address 255.255.255.255
+
+az sql server list-usages \
+  --resource-group "$rg" \
+  --name "$sqlServer" \
+  --query "[?name.value=='FreeDatabaseCount']"
+
+# free-tier path
+az sql db create \
+  --name "$sqlDb" \
+  --server "$sqlServer" \
+  --resource-group "$rg" \
+  --tags author=dab-demo version=0.3.1 owner="$owner" \
+  --use-free-limit true \
+  --edition Free \
+  --max-size 1GB \
+  --query name \
+  --output tsv
+
+# fallback path
+az sql db create \
+  --name "$sqlDb" \
+  --server "$sqlServer" \
+  --resource-group "$rg" \
+  --edition Basic \
+  --service-objective Basic \
+  --tags author=dab-demo version=0.3.1 owner="$owner"
+
+sqlcmd -S "$sqlFqdn" -d "$sqlDb" -G -i "$databasePath"
+
+dab validate --config "$configPath"
+
+az monitor log-analytics workspace create \
+  --resource-group "$rg" \
+  --workspace-name "$logAnalytics" \
+  --location "$region" \
+  --tags author=dab-demo version=0.3.1 owner="$owner"
+
+az monitor log-analytics workspace show \
+  --resource-group "$rg" \
+  --workspace-name "$logAnalytics" \
+  --query customerId
+
+az monitor log-analytics workspace get-shared-keys \
+  --resource-group "$rg" \
+  --workspace-name "$logAnalytics" \
+  --query primarySharedKey
+
+az monitor log-analytics workspace update \
+  --resource-group "$rg" \
+  --workspace-name "$logAnalytics" \
+  --tags author=dab-demo version=0.3.1 owner="$owner" \
+  --retention-time 90
+
+az containerapp env create \
+  --name "$acaEnv" \
+  --resource-group "$rg" \
+  --location "$region" \
+  --logs-workspace-id "$customerId" \
+  --logs-workspace-key "$workspaceKey" \
+  --tags author=dab-demo version=0.3.1 owner="$owner"
+
+az acr create \
+  --resource-group "$rg" \
+  --name "$acrName" \
+  --sku Basic \
+  --admin-enabled false \
+  --tags author=dab-demo version=0.3.1 owner="$owner"
+
+az acr show \
+  --resource-group "$rg" \
+  --name "$acrName" \
+  --query loginServer
+
+az acr build \
+  --resource-group "$rg" \
+  --registry "$acrName" \
+  --image "$imageTag" \
+  --file Dockerfile \
+  --build-arg "DAB_VERSION=$dabVersion" \
+  .
+
+az containerapp create \
+  --name "$container" \
+  --resource-group "$rg" \
+  --environment "$acaEnv" \
+  --system-assigned \
+  --ingress external \
+  --target-port 5000 \
+  --image mcr.microsoft.com/azuredocs/containerapps-helloworld:latest \
+  --cpu 0.5 \
+  --memory 1.0Gi \
+  --env-vars MSSQL_CONNECTION_STRING="$conn" Runtime__ConfigFile=/App/dab-config.json \
+  --tags author=dab-demo version=0.3.1 owner="$owner"
+
+az containerapp show \
+  --name "$container" \
+  --resource-group "$rg" \
+  --query identity.principalId
+
+az acr show \
+  --name "$acrName" \
+  --resource-group "$rg" \
+  --query id
+
+az role assignment create \
+  --assignee "$principalId" \
+  --role AcrPull \
+  --scope "$acrId"
+
+az containerapp registry set \
+  --name "$container" \
+  --resource-group "$rg" \
+  --server "$acrLogin" \
+  --identity system
+
+az containerapp update \
+  --name "$container" \
+  --resource-group "$rg" \
+  --image "$imageTag" \
+  --set-env-vars MSSQL_CONNECTION_STRING="$conn" Runtime__ConfigFile=/App/dab-config.json
+
+az ad sp show \
+  --id "$principalId" \
+  --query displayName
+
+sqlcmd -S "$sqlFqdn" -d "$sqlDb" -G -Q "CREATE USER [...]; ALTER ROLE db_datareader ADD MEMBER [...]; ALTER ROLE db_datawriter ADD MEMBER [...]; GRANT EXECUTE TO [...]"
+
+sqlcmd -S "$sqlFqdn" -d "$sqlDb" -G -Q "<verification query>"
+
+az containerapp revision list \
+  --name "$container" \
+  --resource-group "$rg" \
+  --query "[0].name"
+
+az containerapp revision restart \
+  --name "$container" \
+  --resource-group "$rg" \
+  --revision "$revision"
+
+az containerapp show \
+  --name "$container" \
+  --resource-group "$rg" \
+  --query "{provisioning:properties.provisioningState,running:properties.runningStatus}"
+
+az containerapp replica list \
+  --name "$container" \
+  --resource-group "$rg" \
+  --query "[0].properties.containers[0].restartCount"
+
+az containerapp show \
+  --name "$container" \
+  --resource-group "$rg" \
+  --query properties.configuration.ingress.fqdn
+```

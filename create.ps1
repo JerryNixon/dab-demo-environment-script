@@ -761,8 +761,8 @@ try {
         $prefix = "$prefix-"
     }
     
-    # ACR names must be alphanumeric only (no hyphens), so create sanitized prefix
-    $acrPrefix = $ResourcePrefix -replace '[^a-zA-Z0-9]', ''
+    # ACR names must be alphanumeric only (no hyphens) and lowercase
+    $acrPrefix = ($ResourcePrefix -replace '[^a-zA-Z0-9]', '').ToLower()
     
     $rg = "${prefix}$runTimestamp"
     $acaEnv = "aca-environment"
