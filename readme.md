@@ -26,7 +26,8 @@ Resource Group: dab-demo-<timestamp>
  ├─ Azure Container Registry
  ├─ Azure Log Analytics Workspace
  ├─ Azure Container Apps Environment
- │   └─ Container App (runs Data API builder)
+ │   ├─ Container App (runs Data API builder)
+ │   └─ MCP Inspector (testing/debugging UI) 
  ```
 
  ### Tags used
@@ -44,6 +45,7 @@ Resource Group: dab-demo-<timestamp>
   -DatabasePath ".\databases\database.sql" `          # Customize the database file (default: ./database.sql)
   -ConfigPath ".\configs\dab-config.json" `           # Customize the DAB configuration file (default: ./dab-config.json)
   -NoCleanup                                          # Don't roll back if there is a failure
+  -NoMcpInspector                                     # Don't deploy MCP inspector automatically
 
 # Customize individual resource names (new in v0.4.0)
 ./create.ps1 `
@@ -54,7 +56,22 @@ Resource Group: dab-demo-<timestamp>
   -AcrName "myregistry123" `                          # Custom ACR name (alphanumeric only, lowercase)
   -LogAnalyticsName "my-logs" `                       # Custom Log Analytics workspace name
   -ContainerEnvironmentName "my-aca-env"              # Custom Container App Environment name
+  -McpInspectorName "my-inspector"                    # Custom MCP Inspector name
 ```
+
+### MCP Inspector
+
+By default, the script deploys an [MCP Inspector](https://github.com/anthropic/mcp-inspector) container alongside your DAB API. This provides:
+
+- **Web UI** for testing and debugging your DAB MCP endpoint
+- **Network connectivity** via internal DNS to DAB's MCP endpoint at `http://<container-name>.internal:5000/mcp`
+- **No additional configuration** required - automatically connects to DAB
+- **External ingress** enabled for easy browser access
+
+The MCP Inspector runs in the same Azure Container Apps Environment as your DAB container, giving it private network access through the built-in internal DNS resolution. The inspector is configured with `MCP_SERVER_URL` pointing to the DAB MCP endpoint. You can disable it with `-NoMcpInspector` if not needed.
+- **External ingress** enabled for easy browser access
+
+The MCP Inspector runs in the same Azure Container Apps Environment as your DAB container, giving it private network access through the built-in internal DNS resolution. The inspector is configured with `MCP_SERVER_URL` pointing to the DAB MCP endpoint. You can disable it with `-IncludeMcpInspector:$false` if not needed.
 
 ### Resource naming rules
 
@@ -101,7 +118,7 @@ Deletes DAB resource groups created by create.ps1. The cleanup script finds reso
 az group create \
   --name "$rg" \
   --location "$region" \
-  --tags author=dab-demo version=0.4.0 owner="$owner"
+  --tags author=dab-demo version=0.5.0 owner="$owner"
 
 az ad signed-in-user show \
   --query "{id:id,upn:userPrincipalName}"
@@ -118,7 +135,7 @@ az sql server create \
 az sql server update \
   --name "$sqlServer" \
   --resource-group "$rg" \
-  --set tags.author=dab-demo tags.version=0.4.0 tags.owner="$owner"
+  --set tags.author=dab-demo tags.version=0.5.0 tags.owner="$owner"
 
 az sql server show \
   --name "$sqlServer" \
@@ -142,7 +159,7 @@ az sql db create \
   --name "$sqlDb" \
   --server "$sqlServer" \
   --resource-group "$rg" \
-  --tags author=dab-demo version=0.4.0 owner="$owner" \
+  --tags author=dab-demo version=0.5.0 owner="$owner" \
   --use-free-limit true \
   --edition Free \
   --max-size 1GB \
@@ -156,7 +173,7 @@ az sql db create \
   --resource-group "$rg" \
   --edition Basic \
   --service-objective Basic \
-  --tags author=dab-demo version=0.4.0 owner="$owner"
+  --tags author=dab-demo version=0.5.0 owner="$owner"
 
 sqlcmd -S "$sqlFqdn" -d "$sqlDb" -G -i "$databasePath"
 
@@ -166,7 +183,7 @@ az monitor log-analytics workspace create \
   --resource-group "$rg" \
   --workspace-name "$logAnalytics" \
   --location "$region" \
-  --tags author=dab-demo version=0.4.0 owner="$owner"
+  --tags author=dab-demo version=0.5.0 owner="$owner"
 
 az monitor log-analytics workspace show \
   --resource-group "$rg" \
@@ -181,7 +198,7 @@ az monitor log-analytics workspace get-shared-keys \
 az monitor log-analytics workspace update \
   --resource-group "$rg" \
   --workspace-name "$logAnalytics" \
-  --tags author=dab-demo version=0.4.0 owner="$owner" \
+  --tags author=dab-demo version=0.5.0 owner="$owner" \
   --retention-time 90
 
 az containerapp env create \
@@ -190,14 +207,14 @@ az containerapp env create \
   --location "$region" \
   --logs-workspace-id "$customerId" \
   --logs-workspace-key "$workspaceKey" \
-  --tags author=dab-demo version=0.4.0 owner="$owner"
+  --tags author=dab-demo version=0.5.0 owner="$owner"
 
 az acr create \
   --resource-group "$rg" \
   --name "$acrName" \
   --sku Basic \
   --admin-enabled false \
-  --tags author=dab-demo version=0.4.0 owner="$owner"
+  --tags author=dab-demo version=0.5.0 owner="$owner"
 
 az acr show \
   --resource-group "$rg" \
@@ -223,7 +240,7 @@ az containerapp create \
   --cpu 0.5 \
   --memory 1.0Gi \
   --env-vars MSSQL_CONNECTION_STRING="$conn" Runtime__ConfigFile=/App/dab-config.json \
-  --tags author=dab-demo version=0.4.0 owner="$owner"
+  --tags author=dab-demo version=0.5.0 owner="$owner"
 
 az containerapp show \
   --name "$container" \
@@ -284,4 +301,17 @@ az containerapp show \
   --name "$container" \
   --resource-group "$rg" \
   --query properties.configuration.ingress.fqdn
+
+# Optional: Deploy MCP Inspector (enabled by default)
+az containerapp create \
+  --name "$mcpInspector" \
+  --resource-group "$rg" \
+  --environment "$acaEnv" \
+  --image ghcr.io/anthropic/mcp-inspector:latest \
+  --ingress external \
+  --target-port 3000 \
+  --cpu 0.5 \
+  --memory 1.0Gi \
+  --env-vars MCP_SERVER_URL="http://$container.internal:5000/mcp" \
+  --tags author=dab-demo version=0.5.0 owner="$owner"
 ```

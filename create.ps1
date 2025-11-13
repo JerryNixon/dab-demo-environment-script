@@ -11,8 +11,8 @@
 #   -AcrName: Custom name for Azure Container Registry (default: dabdemoTIMESTAMP)
 #   -LogAnalyticsName: Custom name for Log Analytics workspace (default: log-workspace)
 #   -ContainerEnvironmentName: Custom name for Container App Environment (default: aca-environment)
-#   -IncludeMcpInspector: Deploy MCP Inspector container app for testing/debugging (default: true)
 #   -McpInspectorName: Custom name for MCP Inspector container (default: mcp-inspector)
+#   -NoMcpInspector: Skip MCP Inspector deployment (default: deploy MCP Inspector)
 #   -NoCleanup: Preserve resource group on failure for debugging (default: auto-cleanup)
 #
 # Notes:
@@ -28,7 +28,7 @@
 #   .\create.ps1 -Region westeurope -DatabasePath ".\databases\prod.sql" -ConfigPath ".\configs\prod.json"
 #   .\create.ps1 -ResourceGroupName "my-dab-rg" -SqlServerName "my-sql-server"  # Custom names
 #   .\create.ps1 -ContainerAppName "my-api" -AcrName "myregistry123"  # Mix custom and default names
-#   .\create.ps1 -IncludeMcpInspector:$false  # Skip MCP Inspector deployment
+#   .\create.ps1 -NoMcpInspector  # Skip MCP Inspector deployment
 #   .\create.ps1 -McpInspectorName "my-inspector"  # Custom inspector name
 #   .\create.ps1 -NoCleanup  # Keep resources on failure for debugging
 #
@@ -53,12 +53,27 @@ param(
     
     [string]$ContainerEnvironmentName = "",
     
-    [bool]$IncludeMcpInspector = $true,
-    
     [string]$McpInspectorName = "",
     
-    [switch]$NoCleanup
+    [switch]$NoMcpInspector,
+    
+    [switch]$NoCleanup,
+    
+    [Parameter(ValueFromRemainingArguments)]
+    [string[]]$UnknownArgs
 )
+
+# Validate no unknown/typo parameters were passed
+if ($UnknownArgs) {
+    Write-Host "`n================================================================================" -ForegroundColor Red
+    Write-Host "ERROR: Unknown or misspelled parameter(s) detected" -ForegroundColor Red -BackgroundColor Black
+    Write-Host "================================================================================" -ForegroundColor Red
+    Write-Host "`nUnrecognized argument(s):" -ForegroundColor Yellow
+    foreach ($arg in $UnknownArgs) {
+        Write-Host "  $arg" -ForegroundColor Red
+    }
+    exit 1
+}
 
 $ScriptVersion = "0.5.0"
 $MinimumDabVersion = "1.7.81-rc"  # Minimum required DAB CLI version (note: comparison strips -rc suffix)
@@ -643,7 +658,8 @@ function Invoke-AzCli {
 function Write-DeploymentSummary {
     param(
         $ResourceGroup, $Region, $SqlServer, $SqlDatabase, $Container, $ContainerUrl,
-        $LogAnalytics, $Environment, $CurrentUser, $DatabaseType, $TotalTime, $ClientIp, $SqlServerFqdn, $FirewallRuleName
+        $LogAnalytics, $Environment, $CurrentUser, $DatabaseType, $TotalTime, $ClientIp, $SqlServerFqdn, $FirewallRuleName,
+        $McpInspector, $McpInspectorUrl
     )
     
     $subscriptionIdResult = Invoke-AzCli -Arguments @('account', 'show', '--query', 'id', '--output', 'tsv')
@@ -661,11 +677,19 @@ function Write-DeploymentSummary {
     Write-Host "  Database:          $SqlDatabase ($DatabaseType)"
     Write-Host "  Container App:     $Container"
     
-        Write-Host "`nQUICK LINKS" -ForegroundColor Cyan
-        Write-Host "  Portal:            https://ms.portal.azure.com/#@microsoft.onmicrosoft.com/resource/subscriptions/$subscriptionId/resourceGroups/$ResourceGroup/overview"
+    if ($McpInspector -and $McpInspectorUrl -ne "Not deployed") {
+        Write-Host "  MCP Inspector:     $McpInspector"
+    }
+    
+    Write-Host "`nQUICK LINKS" -ForegroundColor Cyan
+    Write-Host "  Portal:            https://ms.portal.azure.com/#@microsoft.onmicrosoft.com/resource/subscriptions/$subscriptionId/resourceGroups/$ResourceGroup/overview"
     Write-Host "  Swagger:           $ContainerUrl/swagger"
     Write-Host "  GraphQL:           $ContainerUrl/graphql"
     Write-Host "  Health:            $ContainerUrl/health"
+    
+    if ($McpInspector -and $McpInspectorUrl -ne "Not deployed") {
+        Write-Host "  MCP Inspector:     $McpInspectorUrl"
+    }
     
     Write-Host "`n================================================================================" -ForegroundColor Green
 }
@@ -717,6 +741,9 @@ function Assert-AzureResourceName {
             AllowedChars = '^[a-zA-Z0-9._()-]+$'
             RequireLowercase = $false
             StripNonAlphanumeric = $false
+            NoDoubleHyphen = $false
+            NoTrailingHyphen = $false
+            NoLeadingHyphen = $false
             Description = 'Resource groups allow alphanumeric, hyphens, underscores, periods, and parentheses'
         }
         'SqlServer' = @{
@@ -725,6 +752,7 @@ function Assert-AzureResourceName {
             AllowedChars = '^[a-z0-9-]+$'
             RequireLowercase = $true
             StripNonAlphanumeric = $false
+            NoDoubleHyphen = $true
             NoTrailingHyphen = $true
             NoLeadingHyphen = $true
             Description = 'SQL Server names must be lowercase alphanumeric and hyphens only, cannot start or end with hyphen'
@@ -735,6 +763,9 @@ function Assert-AzureResourceName {
             AllowedChars = '^[^<>*%&:\\\/?]+$'  # Most chars allowed, exclude specific special chars
             RequireLowercase = $false
             StripNonAlphanumeric = $false
+            NoDoubleHyphen = $false
+            NoTrailingHyphen = $false
+            NoLeadingHyphen = $false
             Description = 'Database names allow most characters except <>*%&:\/?'
         }
         'ContainerApp' = @{
@@ -754,6 +785,9 @@ function Assert-AzureResourceName {
             AllowedChars = '^[a-zA-Z0-9-]+$'
             RequireLowercase = $false
             StripNonAlphanumeric = $false
+            NoDoubleHyphen = $true
+            NoTrailingHyphen = $true
+            NoLeadingHyphen = $true
             Description = 'Container Environment names allow alphanumeric and hyphens'
         }
         'LogAnalytics' = @{
@@ -762,6 +796,9 @@ function Assert-AzureResourceName {
             AllowedChars = '^[a-zA-Z0-9-]+$'
             RequireLowercase = $false
             StripNonAlphanumeric = $false
+            NoDoubleHyphen = $true
+            NoTrailingHyphen = $true
+            NoLeadingHyphen = $true
             Description = 'Log Analytics workspace names allow alphanumeric and hyphens'
         }
         'ACR' = @{
@@ -770,6 +807,9 @@ function Assert-AzureResourceName {
             AllowedChars = '^[a-z0-9]+$'
             RequireLowercase = $true
             StripNonAlphanumeric = $true
+            NoDoubleHyphen = $false
+            NoTrailingHyphen = $false
+            NoLeadingHyphen = $false
             Description = 'Azure Container Registry names must be lowercase alphanumeric only (no hyphens or special characters)'
         }
     }
@@ -899,6 +939,9 @@ if ($confirm -eq 'list' -or $confirm -eq 'l') {
 $estimatedFinishTime = (Get-Date).AddMinutes(8).ToString("HH:mm:ss")
 Write-Host "Starting deployment. Estimated time to complete: 8m (finish ~$estimatedFinishTime)" -ForegroundColor Cyan
 
+# Initialize resource group variable for cleanup scope
+$rg = $null
+
 try {
     [void](Test-AzureTokenExpiry -ExpiryBufferMinutes 5)
     
@@ -907,19 +950,17 @@ try {
     # DEPLOYMENT
     # ============================================================================
     # Generate resource names: use custom names if provided, otherwise generate defaults with timestamp
-    # Ensure ResourcePrefix ends with hyphen for consistent naming
-    $prefix = $ResourcePrefix
-    if (-not $prefix.EndsWith("-")) {
-        $prefix = "$prefix-"
-    }
+    
+    # Use a standard prefix for default resource names
+    $defaultPrefix = "dab-demo-"
     
     # Generate default names with timestamp if custom names not provided
     if ([string]::IsNullOrWhiteSpace($ResourceGroupName)) {
-        $ResourceGroupName = "${prefix}$runTimestamp"
+        $ResourceGroupName = "${defaultPrefix}$runTimestamp"
     }
     
     if ([string]::IsNullOrWhiteSpace($SqlServerName)) {
-        $SqlServerName = "${prefix}sql-$runTimestamp"
+        $SqlServerName = "${defaultPrefix}sql-$runTimestamp"
     }
     
     if ([string]::IsNullOrWhiteSpace($SqlDatabaseName)) {
@@ -927,12 +968,12 @@ try {
     }
     
     if ([string]::IsNullOrWhiteSpace($ContainerAppName)) {
-        $ContainerAppName = "${prefix}container-$runTimestamp"
+        $ContainerAppName = "${defaultPrefix}container-$runTimestamp"
     }
     
     if ([string]::IsNullOrWhiteSpace($AcrName)) {
-        # ACR needs special handling - strip non-alphanumeric from prefix
-        $acrPrefix = $ResourcePrefix -replace '[^a-zA-Z0-9]', ''
+        # ACR needs special handling - strip non-alphanumeric characters
+        $acrPrefix = $defaultPrefix -replace '[^a-zA-Z0-9]', ''
         $AcrName = "${acrPrefix}$runTimestamp"
     }
     
@@ -944,6 +985,10 @@ try {
         $ContainerEnvironmentName = "aca-environment"
     }
     
+    if ([string]::IsNullOrWhiteSpace($McpInspectorName)) {
+        $McpInspectorName = "mcp-inspector"
+    }
+    
     # Validate and sanitize all resource names according to Azure naming rules
     $rg = Assert-AzureResourceName -Name $ResourceGroupName -ResourceType 'ResourceGroup'
     $sqlServer = Assert-AzureResourceName -Name $SqlServerName -ResourceType 'SqlServer'
@@ -952,6 +997,7 @@ try {
     $acrName = Assert-AzureResourceName -Name $AcrName -ResourceType 'ACR'
     $logAnalytics = Assert-AzureResourceName -Name $LogAnalyticsName -ResourceType 'LogAnalytics'
     $acaEnv = Assert-AzureResourceName -Name $ContainerEnvironmentName -ResourceType 'ContainerEnvironment'
+    $mcpInspector = Assert-AzureResourceName -Name $McpInspectorName -ResourceType 'ContainerApp'
 
     Write-StepStatus "Creating resource group" "Started" "5s"
     $rgStartTime = Get-Date
@@ -1646,6 +1692,62 @@ WHERE dp.name = '$escapedUserName';
         Write-StepStatus "" "Info" $ingressMessage
     }
 
+    # ============================================================================
+    # MCP INSPECTOR DEPLOYMENT (OPTIONAL)
+    # ============================================================================
+    $mcpInspectorUrl = "Not deployed"
+    
+    if (-not $NoMcpInspector) {
+        Write-StepStatus "Deploying MCP Inspector" "Started" "30s"
+        $mcpStartTime = Get-Date
+        
+        # Build internal DNS name for DAB MCP endpoint (container-name.internal:port/mcp)
+        $dabMcpUrl = "http://$container.internal:5000/mcp"
+        
+        # Deploy MCP Inspector container app with connectivity to DAB MCP endpoint
+        $mcpArgs = @(
+            'containerapp', 'create',
+            '--name', $mcpInspector,
+            '--resource-group', $rg,
+            '--environment', $acaEnv,
+            '--image', 'ghcr.io/anthropic/mcp-inspector:latest',
+            '--ingress', 'external',
+            '--target-port', '3000',
+            '--cpu', '0.5',
+            '--memory', '1.0Gi',
+            '--env-vars', "MCP_SERVER_URL=$dabMcpUrl"
+        )
+        
+        $mcpArgs += '--tags'
+        $mcpArgs += $commonTagValues
+        
+        $mcpCreateResult = Invoke-AzCli -Arguments $mcpArgs
+        
+        if ($mcpCreateResult.ExitCode -eq 0) {
+            $mcpElapsed = [math]::Round(((Get-Date) - $mcpStartTime).TotalSeconds, 1)
+            Write-StepStatus "" "Success" "$mcpInspector created ($($mcpElapsed)`s)"
+            
+            # Get MCP Inspector FQDN
+            $mcpFqdnArgs = @('containerapp', 'show', '--name', $mcpInspector, '--resource-group', $rg, '--query', 'properties.configuration.ingress.fqdn', '--output', 'tsv')
+            $mcpFqdnResult = Invoke-AzCli -Arguments $mcpFqdnArgs
+            
+            if ($mcpFqdnResult.ExitCode -eq 0 -and -not [string]::IsNullOrWhiteSpace($mcpFqdnResult.TrimmedText)) {
+                $mcpInspectorFqdn = $mcpFqdnResult.TrimmedText
+                $mcpInspectorUrl = "https://$mcpInspectorFqdn"
+                Write-StepStatus "" "Info" "MCP Inspector URL: $mcpInspectorUrl"
+                Write-StepStatus "" "Info" "Inspector connected to DAB MCP at: $dabMcpUrl"
+            } else {
+                Write-StepStatus "" "Info" "MCP Inspector deployed but URL not yet available"
+            }
+        } else {
+            $mcpError = $mcpCreateResult.TrimmedText
+            Write-StepStatus "" "Info" "MCP Inspector deployment skipped (non-critical): $mcpError"
+            Write-Host "  Continuing without MCP Inspector..." -ForegroundColor DarkGray
+        }
+    } else {
+        Write-StepStatus "" "Info" "MCP Inspector deployment skipped (disabled via -NoMcpInspector)"
+    }
+
     $totalTime = [math]::Round(((Get-Date) - $startTime).TotalMinutes, 1)
     $totalTimeFormatted = "${totalTime}m"
 
@@ -1653,7 +1755,7 @@ WHERE dp.name = '$escapedUserName';
         -Container $container -ContainerUrl $containerUrl -LogAnalytics $logAnalytics `
         -Environment $acaEnv -CurrentUser $currentUserName -DatabaseType $dbType -TotalTime $totalTimeFormatted `
         -ClientIp $clientIp -SqlServerFqdn $sqlServerFqdn `
-        -FirewallRuleName $firewallRuleName
+        -FirewallRuleName $firewallRuleName -McpInspector $mcpInspector -McpInspectorUrl $mcpInspectorUrl
 
     $deploymentSummary = @{
         ResourceGroup = $rg

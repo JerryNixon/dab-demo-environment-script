@@ -32,7 +32,7 @@ $ErrorActionPreference = 'Stop'
 $startTime = Get-Date
 $runTimestamp = Get-Date -Format "yyyyMMddHHmmss"
 
-$script:CliLog = Join-Path $PSScriptRoot "update-$runTimestamp.log"
+$script:CliLog = Join-Path $PSScriptRoot "$runTimestamp.log"
 "[$(Get-Date -Format o)] Update CLI command log - version $ScriptVersion" | Out-File $script:CliLog
 
 # Helper functions
