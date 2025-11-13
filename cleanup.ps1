@@ -289,6 +289,55 @@ Write-Host "Skipped (already deleting):    $skippedCount" -ForegroundColor DarkG
 Write-Host "Failed:                        $failCount" -ForegroundColor $(if ($failCount -eq 0) { "Green" } else { "Red" })
 Write-Host ""
 
+# Refresh and display current status of all DAB resource groups
+Write-Host "Current status of all DAB resource groups:" -ForegroundColor Cyan
+Write-Host ""
+
+$currentGroupsJson = az group list --tag author=dab-demo --output json 2>&1
+if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($currentGroupsJson)) {
+    $currentGroups = $currentGroupsJson | ConvertFrom-Json
+    
+    if ($currentGroups.Count -gt 0) {
+        # Display table header
+        $header = "{0,-4} {1,-45} {2,-20} {3,-15}" -f "#", "Name", "Owner", "Status"
+        Write-Host $header -ForegroundColor White
+        Write-Host ("-" * 85) -ForegroundColor DarkGray
+        
+        # Display each resource group
+        for ($i = 0; $i -lt $currentGroups.Count; $i++) {
+            $grp = $currentGroups[$i]
+            $num = $i + 1
+            $grpName = $grp.name
+            
+            $grpOwner = "unknown"
+            if ($grp.tags) {
+                $grpOwnerProp = $grp.tags.PSObject.Properties['owner']
+                if ($grpOwnerProp) { $grpOwner = $grpOwnerProp.Value }
+            }
+            
+            $grpStatusProp = $grp.properties.PSObject.Properties['provisioningState']
+            $grpStatus = if ($grpStatusProp) { $grpStatusProp.Value } else { "unknown" }
+            
+            $statusColor = switch ($grpStatus) {
+                'Succeeded' { 'Green' }
+                'Deleting' { 'Yellow' }
+                'Failed' { 'Red' }
+                default { 'White' }
+            }
+            
+            $row = "{0,-4} {1,-45} {2,-20} {3,-15}" -f $num, $grpName, $grpOwner, $grpStatus
+            Write-Host $row -ForegroundColor $statusColor
+        }
+        Write-Host ""
+    } else {
+        Write-Host "  No DAB resource groups found" -ForegroundColor Green
+        Write-Host ""
+    }
+} else {
+    Write-Host "  Unable to retrieve current status" -ForegroundColor DarkGray
+    Write-Host ""
+}
+
 if ($successCount -gt 0) {
     Write-Host "NOTE: Deletions are running in the background." -ForegroundColor Yellow
     Write-Host "It may take several minutes for resources to be fully deleted." -ForegroundColor Yellow

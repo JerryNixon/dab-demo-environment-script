@@ -761,13 +761,16 @@ try {
         $prefix = "$prefix-"
     }
     
-    # ACR names must be alphanumeric only (no hyphens) and lowercase
+    # Some Azure resources require lowercase names, so create lowercase prefix variants
+    # ACR: alphanumeric only (no hyphens) and lowercase
     $acrPrefix = ($ResourcePrefix -replace '[^a-zA-Z0-9]', '').ToLower()
+    # Container App and SQL Server: lowercase with hyphens allowed
+    $lowercasePrefix = $prefix.ToLower()
     
     $rg = "${prefix}$runTimestamp"
     $acaEnv = "aca-environment"
-    $container = "${prefix}container-$runTimestamp"
-    $sqlServer = "${prefix}sql-$runTimestamp"
+    $container = "${lowercasePrefix}container-$runTimestamp"
+    $sqlServer = "${lowercasePrefix}sql-$runTimestamp"
     $sqlDb = "sql-database"
     $logAnalytics = "log-workspace"
     $acrName = "${acrPrefix}$runTimestamp"

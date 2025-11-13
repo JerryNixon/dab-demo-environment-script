@@ -17,19 +17,19 @@ Creates a complete new DAB environment from scratch. The current user will need 
 ./create.ps1
 
 # (optional) Customize the region
-.\create.ps1 -Region eastus
+./create.ps1 -Region eastus
 
 # (optional) Customize the database file
-.\create.ps1 -DatabasePath ".\databases\database.sql" 
+./create.ps1 -DatabasePath ".\databases\database.sql" 
 
 # (optional) Customize the DAB configuration file
-.\create.ps1 -ConfigPath ".\configs\dab-config.json"
+./create.ps1 -ConfigPath ".\configs\dab-config.json"
 
 # (optional) Customize the Resource names prefix
-.\create.ps1 -ResourePrefix  
+./create.ps1 -ResourePrefix CUSTOMVALUE
 
 # (optional) Don't roll back if there is a failure
-.\create.ps1 -NoCleanup  
+./create.ps1 -NoCleanup  
 ```
 
 ### Resources created
