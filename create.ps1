@@ -4,9 +4,8 @@
 #   -Region: Azure region for deployment (default: westus2)
 #   -DatabasePath: Path to SQL database file - local or relative from script root (default: ./database.sql)
 #   -ConfigPath: Path to DAB config file - used to build custom image (default: ./dab-config.json)
-#   -Force: Skip subscription confirmation prompt (useful for CI/CD automation)
+#   -ResourcePrefix: Prefix for resource names (default: dab-demo-)
 #   -NoCleanup: Preserve resource group on failure for debugging (default: auto-cleanup)
-#   -VerifyAdOnlyAuth: Verify Azure AD-only authentication is active (adds ~3min wait, optional)
 #
 # Notes:
 #   The script builds a custom Docker image with dab-config.json baked in using Azure Container Registry.
@@ -17,10 +16,8 @@
 #   .\create.ps1
 #   .\create.ps1 -Region eastus
 #   .\create.ps1 -Region westeurope -DatabasePath ".\databases\prod.sql" -ConfigPath ".\configs\prod.json"
-#   .\create.ps1 -Force      # Skip confirmation prompts
+#   .\create.ps1 -ResourcePrefix "my-app-"  # Creates resources like my-app-20251113121514
 #   .\create.ps1 -NoCleanup  # Keep resources on failure for debugging
-#   .\create.ps1 -VerifyAdOnlyAuth  # Verify AD-only auth propagation (slower but more thorough)
-#   .\create.ps1 -SkipVersionCheck  # Skip checking for script updates
 #
 param(
     [string]$Region = "westus2",
@@ -29,16 +26,12 @@ param(
     
     [string]$ConfigPath = "./dab-config.json",
     
-    [switch]$Force,
+    [string]$ResourcePrefix = "dab-demo-",
     
-    [switch]$NoCleanup,
-    
-    [switch]$VerifyAdOnlyAuth,
-    
-    [switch]$SkipVersionCheck
+    [switch]$NoCleanup
 )
 
-$ScriptVersion = "0.3.0"
+$ScriptVersion = "0.3.1"
 $MinimumDabVersion = "1.7.81-rc"  # Minimum required DAB CLI version (note: comparison strips -rc suffix)
 $DockerDabVersion = $MinimumDabVersion   # DAB container image tag to bake into ACR build
 
@@ -100,8 +93,6 @@ function Test-ScriptVersion {
                 Write-Host "  Current: $CurrentVersion" -ForegroundColor White
                 Write-Host "  Latest:  $latestVersion" -ForegroundColor Green
                 Write-Host "  Script:  https://github.com/JerryNixon/dab-demo-environment-script/blob/main/create.ps1" -ForegroundColor Cyan
-                Write-Host ""
-                Write-Host "To skip this check: -SkipVersionCheck" -ForegroundColor DarkGray
                 Write-Host ""
             } elseif ($current -gt $latest) {
                 # Local version is NEWER - inform user but continue
@@ -210,57 +201,68 @@ if (-not (Get-Command sqlcmd -ErrorAction SilentlyContinue)) {
 } else {
     Write-Host "  sqlcmd: " -NoNewline -ForegroundColor Yellow
     try {
-        $sqlcmdVersionOutput = & sqlcmd -? 2>&1 | Out-String
-        if ($sqlcmdVersionOutput -match 'Version\s+(\d+)\.(\d+)\.(\d+)\.(\d+)') {
+        # Try modern sqlcmd first (go-sqlcmd)
+        $sqlcmdVersionOutput = & sqlcmd --version 2>&1 | Out-String
+        if ($sqlcmdVersionOutput -match 'v?(\d+)\.(\d+)\.(\d+)') {
             $majorVersion = [int]$Matches[1]
             $minorVersion = [int]$Matches[2]
-            $sqlcmdVersion = "$majorVersion.$minorVersion.$($Matches[3]).$($Matches[4])"
-            
-            # Check if version supports Azure AD authentication (-G flag)
-            if ($majorVersion -lt 13 -or ($majorVersion -eq 13 -and $minorVersion -lt 1)) {
-                Write-Host "Installed ($sqlcmdVersion) - TOO OLD" -ForegroundColor Red
-                Write-Host ""
-                Write-Host "ERROR: sqlcmd version $sqlcmdVersion does not support Azure AD authentication" -ForegroundColor Red
-                Write-Host "Minimum required version: 13.1.0.0" -ForegroundColor Yellow
-                Write-Host ""
-                Write-Host "Please update sqlcmd:" -ForegroundColor Yellow
-                Write-Host "  Windows: https://aka.ms/ssmsfullsetup" -ForegroundColor White
-                Write-Host "  macOS:   brew upgrade sqlcmd" -ForegroundColor White
-                Write-Host "  Linux:   https://learn.microsoft.com/sql/linux/sql-server-linux-setup-tools" -ForegroundColor White
-                throw "sqlcmd version $sqlcmdVersion is too old (requires 13.1+)"
-            }
-            
+            $patchVersion = [int]$Matches[3]
+            $sqlcmdVersion = "$majorVersion.$minorVersion.$patchVersion"
             Write-Host "Installed ($sqlcmdVersion)" -ForegroundColor Green
         } else {
-            Write-Host "Installed (version unknown - 13.1+ required)" -ForegroundColor Green
+            # Fall back to legacy sqlcmd check
+            $sqlcmdVersionOutput = & sqlcmd -? 2>&1 | Out-String
+            if ($sqlcmdVersionOutput -match 'Version\s+(\d+)\.(\d+)\.(\d+)\.(\d+)') {
+                $majorVersion = [int]$Matches[1]
+                $minorVersion = [int]$Matches[2]
+                $sqlcmdVersion = "$majorVersion.$minorVersion.$($Matches[3]).$($Matches[4])"
+                
+                # Check if legacy version supports Azure AD authentication (-G flag)
+                if ($majorVersion -lt 13 -or ($majorVersion -eq 13 -and $minorVersion -lt 1)) {
+                    Write-Host "Installed ($sqlcmdVersion) - TOO OLD" -ForegroundColor Red
+                    Write-Host ""
+                    Write-Host "ERROR: sqlcmd version $sqlcmdVersion does not support Azure AD authentication" -ForegroundColor Red
+                    Write-Host "Minimum required version: 13.1.0.0" -ForegroundColor Yellow
+                    Write-Host ""
+                    Write-Host "Please update sqlcmd:" -ForegroundColor Yellow
+                    Write-Host "  Windows: https://aka.ms/ssmsfullsetup" -ForegroundColor White
+                    Write-Host "  macOS:   brew upgrade sqlcmd" -ForegroundColor White
+                    Write-Host "  Linux:   https://learn.microsoft.com/sql/linux/sql-server-linux-setup-tools" -ForegroundColor White
+                    throw "sqlcmd version $sqlcmdVersion is too old (requires 13.1+)"
+                }
+                
+                Write-Host "Installed ($sqlcmdVersion)" -ForegroundColor Green
+            } else {
+                Write-Host "Installed (version unknown)" -ForegroundColor Green
+            }
         }
     } catch {
-        Write-Host "Installed (version unknown - 13.1+ required)" -ForegroundColor Green
+        Write-Host "Installed (version unknown)" -ForegroundColor Green
     }
 }
 
 # Database validation
 if (-not (Test-Path $DatabasePath)) {
-        Write-Host "  database.sql: " -NoNewline -ForegroundColor Yellow
-        Write-Host "Not found" -ForegroundColor Red
-        Write-Host ""
-        Write-Host "ERROR: database.sql not found at: $DatabasePath" -ForegroundColor Red
-        Write-Host "Please create a database.sql file with your database schema and try again." -ForegroundColor Yellow
-        Write-Host "Or specify a custom path: -DatabasePath <path>" -ForegroundColor Cyan
-        throw "database.sql not found at: $DatabasePath"
-    }
-
-    $databaseContent = Get-Content $DatabasePath -Raw -ErrorAction SilentlyContinue
-    if ([string]::IsNullOrWhiteSpace($databaseContent)) {
-        Write-Host "  database.sql: " -NoNewline -ForegroundColor Yellow
-        Write-Host "Empty file" -ForegroundColor Red
-        Write-Host ""
-        Write-Host "ERROR: database.sql is empty at: $DatabasePath" -ForegroundColor Red
-        Write-Host "The database script file is empty. Please add SQL commands to create your database." -ForegroundColor Yellow
-        throw "database.sql is empty"
-    }
     Write-Host "  database.sql: " -NoNewline -ForegroundColor Yellow
-    Write-Host "Found" -ForegroundColor Green
+    Write-Host "Not found" -ForegroundColor Red
+    Write-Host ""
+    Write-Host "ERROR: database.sql not found at: $DatabasePath" -ForegroundColor Red
+    Write-Host "Please create a database.sql file with your database schema and try again." -ForegroundColor Yellow
+    Write-Host "Or specify a custom path: -DatabasePath <path>" -ForegroundColor Cyan
+    throw "database.sql not found at: $DatabasePath"
+}
+
+$databaseContent = Get-Content $DatabasePath -Raw -ErrorAction SilentlyContinue
+if ([string]::IsNullOrWhiteSpace($databaseContent)) {
+    Write-Host "  database.sql: " -NoNewline -ForegroundColor Yellow
+    Write-Host "Empty file" -ForegroundColor Red
+    Write-Host ""
+    Write-Host "ERROR: database.sql is empty at: $DatabasePath" -ForegroundColor Red
+    Write-Host "The database script file is empty. Please add SQL commands to create your database." -ForegroundColor Yellow
+    throw "database.sql is empty"
+}
+Write-Host "  database.sql: " -NoNewline -ForegroundColor Yellow
+Write-Host "Found" -ForegroundColor Green
 
 # DAB config validation
 if (-not (Test-Path $ConfigPath)) {
@@ -327,10 +329,8 @@ Write-Host $runTimestamp -ForegroundColor Green
 
 Write-Host ""
 
-# Check for script updates (unless skipped)
-if (-not $SkipVersionCheck) {
-    Test-ScriptVersion -CurrentVersion $ScriptVersion
-}
+# Check for script updates
+Test-ScriptVersion -CurrentVersion $ScriptVersion
 
 Write-Host "Authenticating to Azure..." -ForegroundColor Cyan
 
@@ -704,55 +704,49 @@ Write-Host "`nCurrent subscription:" -ForegroundColor Cyan
 Write-Host "  Name: $currentSub" -ForegroundColor White
 Write-Host "  ID:   $currentSubId" -ForegroundColor DarkGray
 
-if (-not $Force) {
-    $confirm = Read-Host "`nDeploy to this subscription? (y/n/list) [y]"
-    if ($confirm) { $confirm = $confirm.Trim().ToLowerInvariant() }
+$confirm = Read-Host "`nDeploy to this subscription? (y/n/list) [y]"
+if ($confirm) { $confirm = $confirm.Trim().ToLowerInvariant() }
 
-    if ($confirm -eq 'list' -or $confirm -eq 'l') {
-        Write-Host "`nAvailable subscriptions:" -ForegroundColor Cyan
-        $subscriptionListResult = Invoke-AzCli -Arguments @('account', 'list', '--query', '[].{name:name, id:id, isDefault:isDefault}', '--output', 'json')
-        OK $subscriptionListResult "Failed to list subscriptions"
-        $subscriptions = $subscriptionListResult.TrimmedText | ConvertFrom-Json
-        
-        for ($i = 0; $i -lt $subscriptions.Count; $i++) {
-            $sub = $subscriptions[$i]
-            $marker = if ($sub.isDefault) { " (current)" } else { "" }
-            $color = if ($sub.isDefault) { "Green" } else { "White" }
-            Write-Host "$($i + 1). $($sub.name)$marker" -ForegroundColor $color
-            Write-Host "   ID: $($sub.id)" -ForegroundColor DarkGray
-        }
-        
-        do {
-            $choice = Read-Host "`nSelect subscription (1-$($subscriptions.Count)) or press Enter to keep current"
-            if ([string]::IsNullOrWhiteSpace($choice)) { 
-                break 
-            }
-        } while ($choice -notmatch '^\d+$' -or [int]$choice -lt 1 -or [int]$choice -gt $subscriptions.Count)
-        
-        if (-not [string]::IsNullOrWhiteSpace($choice)) {
-            $selectedSub = $subscriptions[[int]$choice - 1]
-            Write-Host "Switching to subscription: $($selectedSub.name)" -ForegroundColor Yellow
-            $setSubscriptionResult = Invoke-AzCli -Arguments @('account', 'set', '--subscription', $selectedSub.id)
-            OK $setSubscriptionResult "Failed to switch subscription"
-            $accountInfoResult = Invoke-AzCli -Arguments @('account', 'show', '--output', 'json')
-            OK $accountInfoResult "Failed to refresh subscription context"
-            $accountInfo = $accountInfoResult.TrimmedText | ConvertFrom-Json
-            $currentSub = $accountInfo.name
-            $currentSubId = $accountInfo.id
-            Write-Host "Now using: $currentSub" -ForegroundColor Green
-        }
-    } elseif ($confirm -and $confirm -ne 'y') {
-        Write-Host "Deployment cancelled by user" -ForegroundColor Yellow
-        exit 0
+if ($confirm -eq 'list' -or $confirm -eq 'l') {
+    Write-Host "`nAvailable subscriptions:" -ForegroundColor Cyan
+    $subscriptionListResult = Invoke-AzCli -Arguments @('account', 'list', '--query', '[].{name:name, id:id, isDefault:isDefault}', '--output', 'json')
+    OK $subscriptionListResult "Failed to list subscriptions"
+    $subscriptions = $subscriptionListResult.TrimmedText | ConvertFrom-Json
+    
+    for ($i = 0; $i -lt $subscriptions.Count; $i++) {
+        $sub = $subscriptions[$i]
+        $marker = if ($sub.isDefault) { " (current)" } else { "" }
+        $color = if ($sub.isDefault) { "Green" } else { "White" }
+        Write-Host "$($i + 1). $($sub.name)$marker" -ForegroundColor $color
+        Write-Host "   ID: $($sub.id)" -ForegroundColor DarkGray
     }
     
-    $estimatedFinishTime = (Get-Date).AddMinutes(8).ToString("HH:mm:ss")
-    Write-Host "Starting deployment. Estimated time to complete: 8m (finish ~$estimatedFinishTime)" -ForegroundColor Cyan
-} else {
-    Write-Host "  -Force specified: skipping confirmation" -ForegroundColor Yellow
-    $estimatedFinishTime = (Get-Date).AddMinutes(8).ToString("HH:mm:ss")
-    Write-Host "Starting deployment. Estimated time to complete: 8m (finish ~$estimatedFinishTime)" -ForegroundColor Cyan
+    do {
+        $choice = Read-Host "`nSelect subscription (1-$($subscriptions.Count)) or press Enter to keep current"
+        if ([string]::IsNullOrWhiteSpace($choice)) { 
+            break 
+        }
+    } while ($choice -notmatch '^\d+$' -or [int]$choice -lt 1 -or [int]$choice -gt $subscriptions.Count)
+    
+    if (-not [string]::IsNullOrWhiteSpace($choice)) {
+        $selectedSub = $subscriptions[[int]$choice - 1]
+        Write-Host "Switching to subscription: $($selectedSub.name)" -ForegroundColor Yellow
+        $setSubscriptionResult = Invoke-AzCli -Arguments @('account', 'set', '--subscription', $selectedSub.id)
+        OK $setSubscriptionResult "Failed to switch subscription"
+        $accountInfoResult = Invoke-AzCli -Arguments @('account', 'show', '--output', 'json')
+        OK $accountInfoResult "Failed to refresh subscription context"
+        $accountInfo = $accountInfoResult.TrimmedText | ConvertFrom-Json
+        $currentSub = $accountInfo.name
+        $currentSubId = $accountInfo.id
+        Write-Host "Now using: $currentSub" -ForegroundColor Green
+    }
+} elseif ($confirm -and $confirm -ne 'y') {
+    Write-Host "Deployment cancelled by user" -ForegroundColor Yellow
+    exit 0
 }
+
+$estimatedFinishTime = (Get-Date).AddMinutes(8).ToString("HH:mm:ss")
+Write-Host "Starting deployment. Estimated time to complete: 8m (finish ~$estimatedFinishTime)" -ForegroundColor Cyan
 
 try {
     [void](Test-AzureTokenExpiry -ExpiryBufferMinutes 5)
@@ -761,13 +755,22 @@ try {
     # ============================================================================
     # DEPLOYMENT
     # ============================================================================
-    $rg = "dab-demo-$runTimestamp"
+    # Ensure ResourcePrefix ends with hyphen for consistent naming
+    $prefix = $ResourcePrefix
+    if (-not $prefix.EndsWith("-")) {
+        $prefix = "$prefix-"
+    }
+    
+    # ACR names must be alphanumeric only (no hyphens), so create sanitized prefix
+    $acrPrefix = $ResourcePrefix -replace '[^a-zA-Z0-9]', ''
+    
+    $rg = "${prefix}$runTimestamp"
     $acaEnv = "aca-environment"
-    $container = "dab-container-$runTimestamp"
-    $sqlServer = "sql-server-$runTimestamp"
+    $container = "${prefix}container-$runTimestamp"
+    $sqlServer = "${prefix}sql-$runTimestamp"
     $sqlDb = "sql-database"
     $logAnalytics = "log-workspace"
-    $acrName = "acr$runTimestamp"
+    $acrName = "${acrPrefix}$runTimestamp"
     
     $rg = Assert-ResourceNameLength -Name $rg -ResourceType 'ResourceGroup'
     $acaEnv = Assert-ResourceNameLength -Name $acaEnv -ResourceType 'ContainerEnvironment'
@@ -858,32 +861,6 @@ try {
     
     $firewallResult = Invoke-AzCli -Arguments $firewallArgs
     OK $firewallResult "Failed to create firewall rule"
-
-    if ($VerifyAdOnlyAuth) {
-        Write-StepStatus "Verifying Entra ID-only authentication (optional check)" "Started" "180s"
-        
-        $adOnlyReady = Invoke-RetryOperation `
-            -ScriptBlock {
-                $adOnlyStateArgs = @('sql', 'server', 'ad-only-auth', 'get', '--resource-group', $rg, '--server-name', $sqlServer, '--query', 'azureAdOnlyAuthentication', '--output', 'tsv')
-                $adOnlyStateResult = Invoke-AzCli -Arguments $adOnlyStateArgs
-                
-                if ($adOnlyStateResult.ExitCode -eq 0 -and $adOnlyStateResult.TrimmedText -eq 'true') {
-                    Write-StepStatus "" "Success" "active"
-                    return $true
-                }
-                return $false
-            } `
-            -MaxRetries 10 `
-            -BaseDelaySeconds 5 `
-            -UseExponentialBackoff `
-            -MaxDelaySeconds 120 `
-            -RetryMessage "attempt {attempt}/{max}, waiting {delay}s" `
-            -OperationName "AD-only auth verification"
-        
-        if (-not $adOnlyReady) {
-            Write-StepStatus "" "Info" "not confirmed after 10 attempts, proceeding anyway"
-        }
-    }
 
     Write-StepStatus "Checking free database capacity" "Started" "5s"
     $freeCheckStartTime = Get-Date
@@ -1020,7 +997,6 @@ try {
             Write-Host "  - Check logs: $script:CliLog" -ForegroundColor White
             Write-Host "  - Verify Azure AD authentication: az sql server ad-only-auth get -g $rg -n $sqlServer" -ForegroundColor White
             Write-Host "  - Test connectivity: sqlcmd -S $sqlServerFqdn -d $sqlDb -G -Q 'SELECT @@VERSION'" -ForegroundColor White
-            Write-Host "  - Azure AD auth error detected. Try running with -VerifyAdOnlyAuth flag" -ForegroundColor Cyan
             throw "Database schema deployment failed after 3 attempts: $($schemaResult.LastError)"
         }
     } else {
@@ -1036,11 +1012,6 @@ try {
     
     $dabInstalled = Get-Command dab -ErrorAction SilentlyContinue
     if (-not $dabInstalled) {
-        if ($Force) {
-            Write-StepStatus "" "Error" "DAB CLI not found in CI/automation mode"
-            throw "DAB CLI is required for validation in CI/automation mode. Install it before running this script."
-        }
-        
         Write-StepStatus "" "Info" "DAB CLI not installed, skipping validation"
     } else {
         try {

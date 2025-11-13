@@ -5,16 +5,13 @@
 #
 # Parameters:
 #   -WhatIf: Show what would be deleted without actually deleting
-#   -Force: Skip confirmation prompts (deletes ALL found groups)
 #
 # Examples:
 #   .\cleanup.ps1                    # Interactive selection mode (default)
 #   .\cleanup.ps1 -WhatIf            # Dry run
-#   .\cleanup.ps1 -Force             # Delete all without prompts
 #
 param(
-    [switch]$WhatIf,
-    [switch]$Force
+    [switch]$WhatIf
 )
 
 $ErrorActionPreference = 'Stop'
@@ -177,37 +174,31 @@ if ($WhatIf) {
 # Selection logic
 $selectedGroups = @()
 
-if ($Force) {
-    # Delete all
+# Interactive selection
+Write-Host "Select resource groups to delete:" -ForegroundColor Cyan
+Write-Host "  - Enter numbers separated by commas (e.g., 1,3,5)" -ForegroundColor White
+Write-Host "  - Enter 'all' to delete all" -ForegroundColor White
+Write-Host "  - Press Enter to cancel" -ForegroundColor White
+Write-Host ""
+
+$selection = Read-Host "Selection"
+
+if ([string]::IsNullOrWhiteSpace($selection)) {
+    Write-Host "Cleanup cancelled by user" -ForegroundColor Yellow
+    exit 0
+}
+
+if ($selection.Trim().ToLower() -eq 'all') {
     $selectedGroups = $resourceGroups
-    Write-Host "Force mode: All $($selectedGroups.Count) resource group(s) will be deleted" -ForegroundColor Yellow
 } else {
-    # Interactive selection
-    Write-Host "Select resource groups to delete:" -ForegroundColor Cyan
-    Write-Host "  - Enter numbers separated by commas (e.g., 1,3,5)" -ForegroundColor White
-    Write-Host "  - Enter 'all' to delete all" -ForegroundColor White
-    Write-Host "  - Press Enter to cancel" -ForegroundColor White
-    Write-Host ""
+    # Parse comma-separated numbers
+    $numbers = $selection -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ -match '^\d+$' } | ForEach-Object { [int]$_ }
     
-    $selection = Read-Host "Selection"
-    
-    if ([string]::IsNullOrWhiteSpace($selection)) {
-        Write-Host "Cleanup cancelled by user" -ForegroundColor Yellow
-        exit 0
-    }
-    
-    if ($selection.Trim().ToLower() -eq 'all') {
-        $selectedGroups = $resourceGroups
-    } else {
-        # Parse comma-separated numbers
-        $numbers = $selection -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ -match '^\d+$' } | ForEach-Object { [int]$_ }
-        
-        foreach ($num in $numbers) {
-            if ($num -ge 1 -and $num -le $resourceGroups.Count) {
-                $selectedGroups += $resourceGroups[$num - 1]
-            } else {
-                Write-Host "WARNING: Invalid selection '$num' (valid range: 1-$($resourceGroups.Count))" -ForegroundColor Yellow
-            }
+    foreach ($num in $numbers) {
+        if ($num -ge 1 -and $num -le $resourceGroups.Count) {
+            $selectedGroups += $resourceGroups[$num - 1]
+        } else {
+            Write-Host "WARNING: Invalid selection '$num' (valid range: 1-$($resourceGroups.Count))" -ForegroundColor Yellow
         }
     }
 }

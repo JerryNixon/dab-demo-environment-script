@@ -1,33 +1,58 @@
 # Deploy Data API Builder to Azure
 
-This project provides PowerShell scripts to deploy and manage Data API Builder (DAB) on Azure Container Apps with Azure SQL Database. Your `dab-config.json` is baked into the container image, so no secrets are stored in environment variables.
+PowerShell scripts to deploy and manage Data API Builder (DAB) on Azure Container Apps with Azure SQL Database. Your `dab-config.json` is baked into the container image, so no secrets are stored in environment variables.
 
-## Prerequisites
+### Prerequisites
 
-- PowerShell 5.1 or newer
-- Azure CLI (logged in)
-- Repo files in the working directory: `database.sql`, `dab-config.json`, `Dockerfile`
+- PowerShell [Install](https://aka.ms/powershell)
+- Azure CLI [Install](http://aka.ms/azcli)
+- SQLCMD [Install](http://aka.ms/sqlcmd)
 
-## Scripts
+## create.ps1 - Deploy New Environment
 
-### create.ps1 - Deploy New Environment
-
-Creates a complete new DAB environment from scratch (~8 minutes).
+Creates a complete new DAB environment from scratch. The current user will need an Azure subscription as well as authority to create. 
 
 ```powershell
 # Deploy new environment
 ./create.ps1
+
+# (optional) Customize the region
+.\create.ps1 -Region eastus
+
+# (optional) Customize the database file
+.\create.ps1 -DatabasePath ".\databases\database.sql" 
+
+# (optional) Customize the DAB configuration file
+.\create.ps1 -ConfigPath ".\configs\dab-config.json"
+
+# (optional) Customize the Resource names prefix
+.\create.ps1 -ResourePrefix  
+
+# (optional) Don't roll back if there is a failure
+.\create.ps1 -NoCleanup  
 ```
 
-The script will interactively:
-- Prompt for Azure subscription selection
-- Prompt for Azure region selection
-- Create all necessary resources with a unique timestamp-based name
+### Resources created
 
-### update.ps1 - Update Existing Image
+```
+Resource Group: dab-demo-<timestamp>
+ ├─ SQL Server
+ │   └─ SQL Database
+ ├─ Azure Container Registry
+ ├─ Azure Log Analytics Workspace
+ ├─ Azure Container Apps Environment
+ │   └─ Container App (runs Data API builder)
+ ```
 
-Updates the container image in an existing deployment with new configuration (~3 minutes).
-The script will list available DAB resource groups and let you select one to update.
+ ### Tags used
+
+- `author=dab-demo` - Used to identify DAB deployments
+- `owner=<username>` - Azure account username
+- `version=<script-version>` - Script version used
+
+## update.ps1 - Update Existing Image
+
+Updates the container image in an existing deployment with new configuration. Every update run pushes a fresh image tagged with the current timestamp, even when `dab-config.json` is unchanged.
 
 ```powershell
 # Update - interactive selection
@@ -37,11 +62,9 @@ The script will list available DAB resource groups and let you select one to upd
 ./update.ps1 -ConfigPath ./custom-config.json
 ```
 
-Every update run pushes a fresh image tagged with the current timestamp, even when `dab-config.json` is unchanged.
+## cleanup.ps1 - Delete Environments
 
-### cleanup.ps1 - Delete Environments
-
-Deletes DAB resource groups created by create.ps1.
+Deletes DAB resource groups created by create.ps1. The cleanup script finds resource groups by the `author=dab-demo` tag and lets you select which ones to delete.
 
 ```powershell
 # Interactive selection (default)
@@ -53,34 +76,4 @@ Deletes DAB resource groups created by create.ps1.
 # Delete all without prompts
 ./cleanup.ps1 -Force
 ```
-
-The cleanup script finds resource groups by the `author=dab-demo` tag and lets you select which ones to delete.
-
-## What Gets Created
-
-Each deployment creates:
-
-- Resource group `dab-demo-<timestamp>`
-- Azure SQL server + database (Free tier if available)
-- Azure Container Registry
-- Azure Container Apps environment + container app
-- Log Analytics workspace
-
-All resources are tagged with:
-- `author=dab-demo` - Used to identify DAB deployments
-- `owner=<username>` - Azure account username
-- `timestamp=<timestamp>` - Creation timestamp
-- `version=<script-version>` - Script version used
-
-## Output
-
-The create and update scripts end with a concise summary that lists:
-
-- Total runtime
-- Resource names and identifiers
-- Image tag (timestamp-based)
-- API endpoint URLs (Swagger, GraphQL, health)
-
-Azure validates regions and other constraints at runtime.
-
 

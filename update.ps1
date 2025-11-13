@@ -6,16 +6,13 @@
 #
 # Parameters:
 #   -ConfigPath: Path to DAB config file (default: ./dab-config.json)
-#   -SkipVersionCheck: Skip checking for script updates
 #
 # Examples:
 #   .\update.ps1
 #   .\update.ps1 -ConfigPath .\configs\prod.json
 #
 param(
-    [string]$ConfigPath = "./dab-config.json",
-    
-    [switch]$SkipVersionCheck
+    [string]$ConfigPath = "./dab-config.json"
 )
 
 $ScriptVersion = "0.1.0"
@@ -90,10 +87,7 @@ if (-not (Test-Path $dockerfilePath)) {
 Write-Host "  Dockerfile: Found" -ForegroundColor Green
 Write-Host "  Build tag: $runTimestamp" -ForegroundColor Green
 Write-Host ""
-
-if (-not $SkipVersionCheck) {
-    Test-ScriptVersion -CurrentVersion $ScriptVersion
-}
+Test-ScriptVersion -CurrentVersion $ScriptVersion
 
 Write-Host "Authenticating to Azure..." -ForegroundColor Cyan
 
