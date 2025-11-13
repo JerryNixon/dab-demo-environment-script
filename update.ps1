@@ -539,3 +539,6 @@ Write-Host "  Swagger:           $containerUrl/swagger" -ForegroundColor White
 Write-Host "  GraphQL:           $containerUrl/graphql" -ForegroundColor White
 Write-Host "  Health:            $containerUrl/health" -ForegroundColor White
 Write-Host ""
+Write-Host "================================================================================" -ForegroundColor Green
+Write-Host ""
+Write-Host "Update log saved to: $script:CliLog" -ForegroundColor Green
