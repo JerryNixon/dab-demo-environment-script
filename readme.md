@@ -15,21 +15,6 @@ Creates a complete new DAB environment from scratch. The current user will need 
 ```powershell
 # Deploy new environment
 ./create.ps1
-
-# (optional) Customize the region
-./create.ps1 -Region eastus
-
-# (optional) Customize the database file
-./create.ps1 -DatabasePath ".\databases\database.sql" 
-
-# (optional) Customize the DAB configuration file
-./create.ps1 -ConfigPath ".\configs\dab-config.json"
-
-# (optional) Customize the Resource names prefix
-./create.ps1 -ResourePrefix CUSTOMVALUE
-
-# (optional) Don't roll back if there is a failure
-./create.ps1 -NoCleanup  
 ```
 
 ### Resources created
@@ -49,6 +34,39 @@ Resource Group: dab-demo-<timestamp>
 - `author=dab-demo` - Used to identify DAB deployments
 - `owner=<username>` - Azure account username
 - `version=<script-version>` - Script version used
+
+### Optional flags
+
+```powershell
+# Deploy new environment with custom parameters
+./create.ps1 `
+  -Region eastus `                                    # Customize the region (default: westus2)
+  -DatabasePath ".\databases\database.sql" `          # Customize the database file (default: ./database.sql)
+  -ConfigPath ".\configs\dab-config.json" `           # Customize the DAB configuration file (default: ./dab-config.json)
+  -NoCleanup                                          # Don't roll back if there is a failure
+
+# Customize individual resource names (new in v0.4.0)
+./create.ps1 `
+  -ResourceGroupName "my-dab-rg" `                    # Custom resource group name
+  -SqlServerName "my-sql-server" `                    # Custom SQL Server name (will be lowercase)
+  -SqlDatabaseName "my-database" `                    # Custom SQL Database name
+  -ContainerAppName "my-api" `                        # Custom Container App name (will be lowercase)
+  -AcrName "myregistry123" `                          # Custom ACR name (alphanumeric only, lowercase)
+  -LogAnalyticsName "my-logs" `                       # Custom Log Analytics workspace name
+  -ContainerEnvironmentName "my-aca-env"              # Custom Container App Environment name
+```
+
+### Resource naming rules
+
+All resource names are automatically validated and sanitized according to Azure naming requirements. Names that don't meet these requirements are automatically corrected (converted to lowercase, invalid characters removed, truncated to max length, etc.).
+
+- **Resource Group**: 1-90 chars, alphanumeric, hyphens, underscores, periods, parentheses allowed
+- **SQL Server**: 1-63 chars, lowercase only, alphanumeric and hyphens, cannot start/end with hyphen
+- **SQL Database**: 1-128 chars, most characters allowed
+- **Container App**: 2-32 chars, lowercase only, alphanumeric and hyphens, no consecutive hyphens, cannot start/end with hyphen
+- **Azure Container Registry**: 5-50 chars, lowercase alphanumeric only (hyphens and special chars stripped automatically)
+- **Log Analytics**: 4-63 chars, alphanumeric and hyphens
+- **Container Environment**: 1-60 chars, alphanumeric and hyphens
 
 ## update.ps1 - Update Existing Image
 
@@ -83,7 +101,7 @@ Deletes DAB resource groups created by create.ps1. The cleanup script finds reso
 az group create \
   --name "$rg" \
   --location "$region" \
-  --tags author=dab-demo version=0.3.1 owner="$owner"
+  --tags author=dab-demo version=0.4.0 owner="$owner"
 
 az ad signed-in-user show \
   --query "{id:id,upn:userPrincipalName}"
@@ -100,7 +118,7 @@ az sql server create \
 az sql server update \
   --name "$sqlServer" \
   --resource-group "$rg" \
-  --set tags.author=dab-demo tags.version=0.3.1 tags.owner="$owner"
+  --set tags.author=dab-demo tags.version=0.4.0 tags.owner="$owner"
 
 az sql server show \
   --name "$sqlServer" \
@@ -124,7 +142,7 @@ az sql db create \
   --name "$sqlDb" \
   --server "$sqlServer" \
   --resource-group "$rg" \
-  --tags author=dab-demo version=0.3.1 owner="$owner" \
+  --tags author=dab-demo version=0.4.0 owner="$owner" \
   --use-free-limit true \
   --edition Free \
   --max-size 1GB \
@@ -138,7 +156,7 @@ az sql db create \
   --resource-group "$rg" \
   --edition Basic \
   --service-objective Basic \
-  --tags author=dab-demo version=0.3.1 owner="$owner"
+  --tags author=dab-demo version=0.4.0 owner="$owner"
 
 sqlcmd -S "$sqlFqdn" -d "$sqlDb" -G -i "$databasePath"
 
@@ -148,7 +166,7 @@ az monitor log-analytics workspace create \
   --resource-group "$rg" \
   --workspace-name "$logAnalytics" \
   --location "$region" \
-  --tags author=dab-demo version=0.3.1 owner="$owner"
+  --tags author=dab-demo version=0.4.0 owner="$owner"
 
 az monitor log-analytics workspace show \
   --resource-group "$rg" \
@@ -163,7 +181,7 @@ az monitor log-analytics workspace get-shared-keys \
 az monitor log-analytics workspace update \
   --resource-group "$rg" \
   --workspace-name "$logAnalytics" \
-  --tags author=dab-demo version=0.3.1 owner="$owner" \
+  --tags author=dab-demo version=0.4.0 owner="$owner" \
   --retention-time 90
 
 az containerapp env create \
@@ -172,14 +190,14 @@ az containerapp env create \
   --location "$region" \
   --logs-workspace-id "$customerId" \
   --logs-workspace-key "$workspaceKey" \
-  --tags author=dab-demo version=0.3.1 owner="$owner"
+  --tags author=dab-demo version=0.4.0 owner="$owner"
 
 az acr create \
   --resource-group "$rg" \
   --name "$acrName" \
   --sku Basic \
   --admin-enabled false \
-  --tags author=dab-demo version=0.3.1 owner="$owner"
+  --tags author=dab-demo version=0.4.0 owner="$owner"
 
 az acr show \
   --resource-group "$rg" \
@@ -205,7 +223,7 @@ az containerapp create \
   --cpu 0.5 \
   --memory 1.0Gi \
   --env-vars MSSQL_CONNECTION_STRING="$conn" Runtime__ConfigFile=/App/dab-config.json \
-  --tags author=dab-demo version=0.3.1 owner="$owner"
+  --tags author=dab-demo version=0.4.0 owner="$owner"
 
 az containerapp show \
   --name "$container" \

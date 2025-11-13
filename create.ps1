@@ -4,19 +4,32 @@
 #   -Region: Azure region for deployment (default: westus2)
 #   -DatabasePath: Path to SQL database file - local or relative from script root (default: ./database.sql)
 #   -ConfigPath: Path to DAB config file - used to build custom image (default: ./dab-config.json)
-#   -ResourcePrefix: Prefix for resource names (default: dab-demo-)
+#   -ResourceGroupName: Custom name for resource group (default: dab-demo-TIMESTAMP)
+#   -SqlServerName: Custom name for SQL Server (default: dab-demo-sql-TIMESTAMP)
+#   -SqlDatabaseName: Custom name for SQL Database (default: sql-database)
+#   -ContainerAppName: Custom name for Container App (default: dab-demo-container-TIMESTAMP)
+#   -AcrName: Custom name for Azure Container Registry (default: dabdemoTIMESTAMP)
+#   -LogAnalyticsName: Custom name for Log Analytics workspace (default: log-workspace)
+#   -ContainerEnvironmentName: Custom name for Container App Environment (default: aca-environment)
+#   -IncludeMcpInspector: Deploy MCP Inspector container app for testing/debugging (default: true)
+#   -McpInspectorName: Custom name for MCP Inspector container (default: mcp-inspector)
 #   -NoCleanup: Preserve resource group on failure for debugging (default: auto-cleanup)
 #
 # Notes:
 #   The script builds a custom Docker image with dab-config.json baked in using Azure Container Registry.
 #   The Dockerfile must be present in the current directory.
 #   To update an existing deployment, use update.ps1 instead.
+#   Resource names are automatically validated and sanitized according to Azure naming rules.
+#   MCP Inspector is deployed by default in the same ACA environment with internal DNS connectivity to DAB.
 #
 # Examples:
 #   .\create.ps1
 #   .\create.ps1 -Region eastus
 #   .\create.ps1 -Region westeurope -DatabasePath ".\databases\prod.sql" -ConfigPath ".\configs\prod.json"
-#   .\create.ps1 -ResourcePrefix "my-app-"  # Creates resources like my-app-20251113121514
+#   .\create.ps1 -ResourceGroupName "my-dab-rg" -SqlServerName "my-sql-server"  # Custom names
+#   .\create.ps1 -ContainerAppName "my-api" -AcrName "myregistry123"  # Mix custom and default names
+#   .\create.ps1 -IncludeMcpInspector:$false  # Skip MCP Inspector deployment
+#   .\create.ps1 -McpInspectorName "my-inspector"  # Custom inspector name
 #   .\create.ps1 -NoCleanup  # Keep resources on failure for debugging
 #
 param(
@@ -26,12 +39,28 @@ param(
     
     [string]$ConfigPath = "./dab-config.json",
     
-    [string]$ResourcePrefix = "dab-demo-",
+    [string]$ResourceGroupName = "",
+    
+    [string]$SqlServerName = "",
+    
+    [string]$SqlDatabaseName = "",
+    
+    [string]$ContainerAppName = "",
+    
+    [string]$AcrName = "",
+    
+    [string]$LogAnalyticsName = "",
+    
+    [string]$ContainerEnvironmentName = "",
+    
+    [bool]$IncludeMcpInspector = $true,
+    
+    [string]$McpInspectorName = "",
     
     [switch]$NoCleanup
 )
 
-$ScriptVersion = "0.3.1"
+$ScriptVersion = "0.5.0"
 $MinimumDabVersion = "1.7.81-rc"  # Minimum required DAB CLI version (note: comparison strips -rc suffix)
 $DockerDabVersion = $MinimumDabVersion   # DAB container image tag to bake into ACR build
 
@@ -641,7 +670,28 @@ function Write-DeploymentSummary {
     Write-Host "`n================================================================================" -ForegroundColor Green
 }
 
-function Assert-ResourceNameLength {
+function Assert-AzureResourceName {
+    <#
+    .SYNOPSIS
+    Validates and sanitizes Azure resource names according to Azure naming rules.
+    
+    .DESCRIPTION
+    Applies resource-type-specific naming rules including:
+    - Casing requirements (lowercase for SQL Server, Container Apps, ACR)
+    - Character restrictions (alphanumeric only for ACR, no special chars for others)
+    - Length constraints (different limits per resource type)
+    - Pattern validation (no double hyphens, no starting/ending with hyphen)
+    
+    .PARAMETER Name
+    The proposed resource name to validate and sanitize.
+    
+    .PARAMETER ResourceType
+    The type of Azure resource. Determines which naming rules to apply.
+    
+    .OUTPUTS
+    Returns the sanitized resource name that conforms to Azure naming rules.
+    Throws an error if the name cannot be made valid.
+    #>
     param(
         [Parameter(Mandatory)]
         [string]$Name,
@@ -653,30 +703,131 @@ function Assert-ResourceNameLength {
             'Database',
             'ContainerApp',
             'ContainerEnvironment',
-            'LogAnalytics'
+            'LogAnalytics',
+            'ACR'
         )]
-        [string]$ResourceType,
-        
-        [int]$MaxLength = 0
+        [string]$ResourceType
     )
     
-    $limits = @{
-        'ResourceGroup'        = 90
-        'SqlServer'            = 63
-        'Database'             = 128
-        'ContainerApp'         = 32
-        'ContainerEnvironment' = 60
-        'LogAnalytics'         = 63
+    # Define naming rules per resource type
+    $rules = @{
+        'ResourceGroup' = @{
+            MinLength = 1
+            MaxLength = 90
+            AllowedChars = '^[a-zA-Z0-9._()-]+$'
+            RequireLowercase = $false
+            StripNonAlphanumeric = $false
+            Description = 'Resource groups allow alphanumeric, hyphens, underscores, periods, and parentheses'
+        }
+        'SqlServer' = @{
+            MinLength = 1
+            MaxLength = 63
+            AllowedChars = '^[a-z0-9-]+$'
+            RequireLowercase = $true
+            StripNonAlphanumeric = $false
+            NoTrailingHyphen = $true
+            NoLeadingHyphen = $true
+            Description = 'SQL Server names must be lowercase alphanumeric and hyphens only, cannot start or end with hyphen'
+        }
+        'Database' = @{
+            MinLength = 1
+            MaxLength = 128
+            AllowedChars = '^[^<>*%&:\\\/?]+$'  # Most chars allowed, exclude specific special chars
+            RequireLowercase = $false
+            StripNonAlphanumeric = $false
+            Description = 'Database names allow most characters except <>*%&:\/?'
+        }
+        'ContainerApp' = @{
+            MinLength = 2
+            MaxLength = 32
+            AllowedChars = '^[a-z0-9-]+$'
+            RequireLowercase = $true
+            StripNonAlphanumeric = $false
+            NoDoubleHyphen = $true
+            NoTrailingHyphen = $true
+            NoLeadingHyphen = $true
+            Description = 'Container App names must be lowercase alphanumeric and hyphens, no consecutive hyphens, cannot start or end with hyphen'
+        }
+        'ContainerEnvironment' = @{
+            MinLength = 1
+            MaxLength = 60
+            AllowedChars = '^[a-zA-Z0-9-]+$'
+            RequireLowercase = $false
+            StripNonAlphanumeric = $false
+            Description = 'Container Environment names allow alphanumeric and hyphens'
+        }
+        'LogAnalytics' = @{
+            MinLength = 4
+            MaxLength = 63
+            AllowedChars = '^[a-zA-Z0-9-]+$'
+            RequireLowercase = $false
+            StripNonAlphanumeric = $false
+            Description = 'Log Analytics workspace names allow alphanumeric and hyphens'
+        }
+        'ACR' = @{
+            MinLength = 5
+            MaxLength = 50
+            AllowedChars = '^[a-z0-9]+$'
+            RequireLowercase = $true
+            StripNonAlphanumeric = $true
+            Description = 'Azure Container Registry names must be lowercase alphanumeric only (no hyphens or special characters)'
+        }
     }
     
-    $maxLen = if ($MaxLength -gt 0) { $MaxLength } else { $limits[$ResourceType] }
+    $rule = $rules[$ResourceType]
+    $sanitizedName = $Name
     
-    if ($Name.Length -gt $maxLen) {
-        $trimmedName = $Name.Substring(0, $maxLen)
-        return $trimmedName
+    # Apply lowercase if required
+    if ($rule.RequireLowercase) {
+        $sanitizedName = $sanitizedName.ToLower()
     }
     
-    return $Name
+    # Strip non-alphanumeric characters if required (for ACR)
+    if ($rule.StripNonAlphanumeric) {
+        $sanitizedName = $sanitizedName -replace '[^a-zA-Z0-9]', ''
+        if ($rule.RequireLowercase) {
+            $sanitizedName = $sanitizedName.ToLower()
+        }
+    }
+    
+    # Remove double hyphens if not allowed
+    if ($rule.NoDoubleHyphen) {
+        while ($sanitizedName -match '--') {
+            $sanitizedName = $sanitizedName -replace '--', '-'
+        }
+    }
+    
+    # Remove leading hyphen if not allowed
+    if ($rule.NoLeadingHyphen) {
+        $sanitizedName = $sanitizedName.TrimStart('-')
+    }
+    
+    # Remove trailing hyphen if not allowed
+    if ($rule.NoTrailingHyphen) {
+        $sanitizedName = $sanitizedName.TrimEnd('-')
+    }
+    
+    # Validate minimum length
+    if ($sanitizedName.Length -lt $rule.MinLength) {
+        throw "Resource name '$Name' for $ResourceType is too short after sanitization (min: $($rule.MinLength) chars). Result: '$sanitizedName'. $($rule.Description)"
+    }
+    
+    # Trim to maximum length if needed
+    if ($sanitizedName.Length -gt $rule.MaxLength) {
+        $sanitizedName = $sanitizedName.Substring(0, $rule.MaxLength)
+        
+        # Re-apply trailing hyphen removal after truncation
+        if ($rule.NoTrailingHyphen) {
+            $sanitizedName = $sanitizedName.TrimEnd('-')
+        }
+    }
+    
+    # Final validation against allowed character pattern
+    if ($sanitizedName -notmatch $rule.AllowedChars) {
+        throw "Resource name '$sanitizedName' for $ResourceType contains invalid characters. $($rule.Description)"
+    }
+    
+    return $sanitizedName
 }
 
 $accountInfoResult = Invoke-AzCli -Arguments @('account', 'show', '--output', 'json')
@@ -755,32 +906,52 @@ try {
     # ============================================================================
     # DEPLOYMENT
     # ============================================================================
+    # Generate resource names: use custom names if provided, otherwise generate defaults with timestamp
     # Ensure ResourcePrefix ends with hyphen for consistent naming
     $prefix = $ResourcePrefix
     if (-not $prefix.EndsWith("-")) {
         $prefix = "$prefix-"
     }
     
-    # Some Azure resources require lowercase names, so create lowercase prefix variants
-    # ACR: alphanumeric only (no hyphens) and lowercase
-    $acrPrefix = ($ResourcePrefix -replace '[^a-zA-Z0-9]', '').ToLower()
-    # Container App and SQL Server: lowercase with hyphens allowed
-    $lowercasePrefix = $prefix.ToLower()
+    # Generate default names with timestamp if custom names not provided
+    if ([string]::IsNullOrWhiteSpace($ResourceGroupName)) {
+        $ResourceGroupName = "${prefix}$runTimestamp"
+    }
     
-    $rg = "${prefix}$runTimestamp"
-    $acaEnv = "aca-environment"
-    $container = "${lowercasePrefix}container-$runTimestamp"
-    $sqlServer = "${lowercasePrefix}sql-$runTimestamp"
-    $sqlDb = "sql-database"
-    $logAnalytics = "log-workspace"
-    $acrName = "${acrPrefix}$runTimestamp"
+    if ([string]::IsNullOrWhiteSpace($SqlServerName)) {
+        $SqlServerName = "${prefix}sql-$runTimestamp"
+    }
     
-    $rg = Assert-ResourceNameLength -Name $rg -ResourceType 'ResourceGroup'
-    $acaEnv = Assert-ResourceNameLength -Name $acaEnv -ResourceType 'ContainerEnvironment'
-    $container = Assert-ResourceNameLength -Name $container -ResourceType 'ContainerApp'
-    $sqlServer = Assert-ResourceNameLength -Name $sqlServer -ResourceType 'SqlServer'
-    $sqlDb = Assert-ResourceNameLength -Name $sqlDb -ResourceType 'Database'
-    $logAnalytics = Assert-ResourceNameLength -Name $logAnalytics -ResourceType 'LogAnalytics'
+    if ([string]::IsNullOrWhiteSpace($SqlDatabaseName)) {
+        $SqlDatabaseName = "sql-database"
+    }
+    
+    if ([string]::IsNullOrWhiteSpace($ContainerAppName)) {
+        $ContainerAppName = "${prefix}container-$runTimestamp"
+    }
+    
+    if ([string]::IsNullOrWhiteSpace($AcrName)) {
+        # ACR needs special handling - strip non-alphanumeric from prefix
+        $acrPrefix = $ResourcePrefix -replace '[^a-zA-Z0-9]', ''
+        $AcrName = "${acrPrefix}$runTimestamp"
+    }
+    
+    if ([string]::IsNullOrWhiteSpace($LogAnalyticsName)) {
+        $LogAnalyticsName = "log-workspace"
+    }
+    
+    if ([string]::IsNullOrWhiteSpace($ContainerEnvironmentName)) {
+        $ContainerEnvironmentName = "aca-environment"
+    }
+    
+    # Validate and sanitize all resource names according to Azure naming rules
+    $rg = Assert-AzureResourceName -Name $ResourceGroupName -ResourceType 'ResourceGroup'
+    $sqlServer = Assert-AzureResourceName -Name $SqlServerName -ResourceType 'SqlServer'
+    $sqlDb = Assert-AzureResourceName -Name $SqlDatabaseName -ResourceType 'Database'
+    $container = Assert-AzureResourceName -Name $ContainerAppName -ResourceType 'ContainerApp'
+    $acrName = Assert-AzureResourceName -Name $AcrName -ResourceType 'ACR'
+    $logAnalytics = Assert-AzureResourceName -Name $LogAnalyticsName -ResourceType 'LogAnalytics'
+    $acaEnv = Assert-AzureResourceName -Name $ContainerEnvironmentName -ResourceType 'ContainerEnvironment'
 
     Write-StepStatus "Creating resource group" "Started" "5s"
     $rgStartTime = Get-Date
@@ -1290,6 +1461,9 @@ END CATCH
     $verifyStartTime = Get-Date
     
     try {
+        # Escape the username for SQL query (same escaping as in the grant operation)
+        $escapedUserName = $sqlUserName.Replace("'", "''")
+        
         $verifyPermsQuery = @"
 SELECT 
     dp.name AS PrincipalName,
