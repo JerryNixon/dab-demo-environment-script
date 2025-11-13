@@ -30,81 +30,107 @@ if (-not (Get-Command az -ErrorAction SilentlyContinue)) {
 }
 
 # Login check
-Write-Host "Checking Azure authentication..." -ForegroundColor Cyan
-$loginCheck = az account show 2>&1
-if ($LASTEXITCODE -ne 0) {
-    Write-Host "Not logged in. Authenticating..." -ForegroundColor Yellow
-    az login --output none
+Write-Host "Authenticating to Azure..." -ForegroundColor Cyan
+
+try {
+    az login --output none 2>&1 | Out-Null
     if ($LASTEXITCODE -ne 0) {
-        Write-Host "ERROR: Azure login failed" -ForegroundColor Red
-        exit 1
+        throw "Azure login failed"
     }
+    Write-Host "Azure authentication completed successfully" -ForegroundColor Green
+} catch {
+    Write-Host "Azure authentication failed" -ForegroundColor Red
+    Write-Host "Please ensure you have access to an Azure subscription and try again." -ForegroundColor Yellow
+    exit 1
 }
 
-$currentSub = az account show --query name -o tsv
-$currentUser = az account show --query user.name -o tsv
-Write-Host "Current subscription: $currentSub" -ForegroundColor Green
-Write-Host "Current user:         $currentUser" -ForegroundColor Green
+$accountInfoJson = az account show --output json 2>&1
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "ERROR: Failed to retrieve account information after login" -ForegroundColor Red
+    exit 1
+}
+
+$accountInfo = $accountInfoJson | ConvertFrom-Json
+$currentSub = $accountInfo.name
+$currentSubId = $accountInfo.id
+
+Write-Host ""
+Write-Host "Current subscription:" -ForegroundColor Cyan
+Write-Host "  Name: $currentSub" -ForegroundColor White
+Write-Host "  ID:   $currentSubId" -ForegroundColor DarkGray
+
+$confirm = Read-Host "`nUse this subscription? (y/n/list) [y]"
+if ($confirm) { $confirm = $confirm.Trim().ToLowerInvariant() }
+
+if ($confirm -eq 'list' -or $confirm -eq 'l') {
+    Write-Host "`nAvailable subscriptions:" -ForegroundColor Cyan
+    $subscriptionListJson = az account list --query '[].{name:name, id:id, isDefault:isDefault}' --output json 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "ERROR: Failed to list subscriptions" -ForegroundColor Red
+        exit 1
+    }
+    $subscriptions = $subscriptionListJson | ConvertFrom-Json
+    
+    for ($i = 0; $i -lt $subscriptions.Count; $i++) {
+        $sub = $subscriptions[$i]
+        $marker = if ($sub.isDefault) { " (current)" } else { "" }
+        $color = if ($sub.isDefault) { "Green" } else { "White" }
+        Write-Host "$($i + 1). $($sub.name)$marker" -ForegroundColor $color
+        Write-Host "   ID: $($sub.id)" -ForegroundColor DarkGray
+    }
+    
+    do {
+        $choice = Read-Host "`nSelect subscription (1-$($subscriptions.Count)) or press Enter to keep current"
+        if ([string]::IsNullOrWhiteSpace($choice)) { 
+            break 
+        }
+    } while ($choice -notmatch '^\d+$' -or [int]$choice -lt 1 -or [int]$choice -gt $subscriptions.Count)
+    
+    if (-not [string]::IsNullOrWhiteSpace($choice)) {
+        $selectedSub = $subscriptions[[int]$choice - 1]
+        Write-Host "Switching to subscription: $($selectedSub.name)" -ForegroundColor Yellow
+        az account set --subscription $selectedSub.id 2>&1 | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "ERROR: Failed to switch subscription" -ForegroundColor Red
+            exit 1
+        }
+        $accountInfoJson = az account show --output json 2>&1
+        $accountInfo = $accountInfoJson | ConvertFrom-Json
+        $currentSub = $accountInfo.name
+        $currentSubId = $accountInfo.id
+        Write-Host "Now using: $currentSub" -ForegroundColor Green
+    }
+} elseif ($confirm -and $confirm -ne 'y') {
+    Write-Host "Cleanup cancelled by user" -ForegroundColor Yellow
+    exit 0
+}
 Write-Host ""
 
 # Find resource groups with the author tag
 Write-Host "Searching for dab-demo resource groups..." -ForegroundColor Cyan
-$newGroupsJson = az group list --tag author=dab-demo --output json 2>&1
+$groupsJson = az group list --tag author=dab-demo --output json 2>&1
 if ($LASTEXITCODE -ne 0) {
     Write-Host "ERROR: Failed to list resource groups" -ForegroundColor Red
-    Write-Host $newGroupsJson -ForegroundColor DarkRed
+    Write-Host $groupsJson -ForegroundColor DarkRed
     exit 1
 }
 
 $resourceGroups = @()
-$newGroups = if ($newGroupsJson.Trim()) { $newGroupsJson | ConvertFrom-Json } else { @() }
-if ($newGroups) { $resourceGroups += $newGroups }
-
-# Include legacy groups created before the author tag rename (dab-deploy-demo-script)
-$legacyGroupsJson = az group list --tag author=dab-deploy-demo-script --output json 2>&1
-if ($LASTEXITCODE -eq 0 -and $legacyGroupsJson.Trim()) {
-    $legacyGroups = $legacyGroupsJson | ConvertFrom-Json
-    $legacyAdded = 0
-    foreach ($legacy in $legacyGroups) {
-        if (-not ($resourceGroups | Where-Object { $_.name -eq $legacy.name })) {
-            $resourceGroups += $legacy
-            $legacyAdded++
-        }
-    }
-    if ($legacyAdded -gt 0) {
-        Write-Host "Including $legacyAdded legacy resource group(s) tagged with author=dab-deploy-demo-script" -ForegroundColor DarkGray
-    }
+if ($groupsJson.Trim()) {
+    $resourceGroups = $groupsJson | ConvertFrom-Json
 }
 
 if ($resourceGroups.Count -eq 0) {
-    Write-Host "No resource groups found with tags 'author=dab-demo' or 'author=dab-deploy-demo-script'" -ForegroundColor Yellow
+    Write-Host "No resource groups found with tag 'author=dab-demo'" -ForegroundColor Yellow
     Write-Host ""
     Write-Host "Nothing to clean up!" -ForegroundColor Green
     exit 0
 }
 
-Write-Host "Found $($resourceGroups.Count) resource group(s):" -ForegroundColor Yellow
-Write-Host ""
-
 # Build display table with index
 $rgTable = @()
 $index = 1
 foreach ($rg in $resourceGroups) {
-    # Null-safe tag access using PSObject.Properties
-    $created = "unknown"
-    if ($rg.tags) {
-        $timestampProp = $rg.tags.PSObject.Properties['timestamp']
-        if ($timestampProp) {
-            $ts = $timestampProp.Value
-            # Format as YYYY-MM-DD HH:MM:SS
-            if ($ts -match '^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})$') {
-                $created = "$($Matches[1])-$($Matches[2])-$($Matches[3]) $($Matches[4]):$($Matches[5]):$($Matches[6])"
-            } else {
-                $created = $ts
-            }
-        }
-    }
-    
     $owner = "unknown"
     if ($rg.tags) {
         $ownerProp = $rg.tags.PSObject.Properties['owner']
@@ -118,12 +144,10 @@ foreach ($rg in $resourceGroups) {
     $status = if ($statusProp) { $statusProp.Value } else { "unknown" }
     
     $rgTable += [PSCustomObject]@{
-        '#'      = $index
-        Name     = $rg.name
-        Location = $rg.location
-        Owner    = $owner
-        Status   = $status
-        Created  = $created
+        '#'    = $index
+        Name   = $rg.name
+        Owner  = $owner
+        Status = $status
     }
     $index++
 }

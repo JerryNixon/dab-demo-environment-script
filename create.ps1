@@ -7,46 +7,38 @@
 #   -Force: Skip subscription confirmation prompt (useful for CI/CD automation)
 #   -NoCleanup: Preserve resource group on failure for debugging (default: auto-cleanup)
 #   -VerifyAdOnlyAuth: Verify Azure AD-only authentication is active (adds ~3min wait, optional)
-#   -UpdateImage: Update existing deployment with new DAB config (specify resource group name)
 #
 # Notes:
 #   The script builds a custom Docker image with dab-config.json baked in using Azure Container Registry.
 #   The Dockerfile must be present in the current directory.
+#   To update an existing deployment, use update.ps1 instead.
 #
 # Examples:
-#   .\script.ps1
-#   .\script.ps1 -Region eastus
-#   .\script.ps1 -Region westeurope -DatabasePath ".\databases\prod.sql" -ConfigPath ".\configs\prod.json"
-#   .\script.ps1 -Force      # Skip confirmation prompts
-#   .\script.ps1 -NoCleanup  # Keep resources on failure for debugging
-#   .\script.ps1 -VerifyAdOnlyAuth  # Verify AD-only auth propagation (slower but more thorough)
-#   .\script.ps1 -UpdateImage dab-demo-20251111113005  # Update existing deployment
-#   .\script.ps1 -SkipVersionCheck  # Skip checking for script updates
+#   .\create.ps1
+#   .\create.ps1 -Region eastus
+#   .\create.ps1 -Region westeurope -DatabasePath ".\databases\prod.sql" -ConfigPath ".\configs\prod.json"
+#   .\create.ps1 -Force      # Skip confirmation prompts
+#   .\create.ps1 -NoCleanup  # Keep resources on failure for debugging
+#   .\create.ps1 -VerifyAdOnlyAuth  # Verify AD-only auth propagation (slower but more thorough)
+#   .\create.ps1 -SkipVersionCheck  # Skip checking for script updates
 #
 param(
-    [Parameter(ParameterSetName='Deploy')]
     [string]$Region = "westus2",
     
-    [Parameter(ParameterSetName='Deploy')]
     [string]$DatabasePath = "./database.sql",
     
     [string]$ConfigPath = "./dab-config.json",
     
     [switch]$Force,
     
-    [Parameter(ParameterSetName='Deploy')]
     [switch]$NoCleanup,
     
-    [Parameter(ParameterSetName='Deploy')]
     [switch]$VerifyAdOnlyAuth,
-    
-    [Parameter(ParameterSetName='UpdateImage', Mandatory)]
-    [string]$UpdateImage,
     
     [switch]$SkipVersionCheck
 )
 
-$ScriptVersion = "0.2.5"
+$ScriptVersion = "0.3.0"
 $MinimumDabVersion = "1.7.81-rc"  # Minimum required DAB CLI version (note: comparison strips -rc suffix)
 $DockerDabVersion = $MinimumDabVersion   # DAB container image tag to bake into ACR build
 
@@ -247,9 +239,8 @@ if (-not (Get-Command sqlcmd -ErrorAction SilentlyContinue)) {
     }
 }
 
-# Database validation (Deploy mode only)
-if ($PSCmdlet.ParameterSetName -eq 'Deploy') {
-    if (-not (Test-Path $DatabasePath)) {
+# Database validation
+if (-not (Test-Path $DatabasePath)) {
         Write-Host "  database.sql: " -NoNewline -ForegroundColor Yellow
         Write-Host "Not found" -ForegroundColor Red
         Write-Host ""
@@ -270,9 +261,8 @@ if ($PSCmdlet.ParameterSetName -eq 'Deploy') {
     }
     Write-Host "  database.sql: " -NoNewline -ForegroundColor Yellow
     Write-Host "Found" -ForegroundColor Green
-}
 
-# DAB config validation (both modes)
+# DAB config validation
 if (-not (Test-Path $ConfigPath)) {
     Write-Host "  dab-config.json: " -NoNewline -ForegroundColor Yellow
     Write-Host "Not found" -ForegroundColor Red
@@ -364,6 +354,127 @@ function Wait-Seconds {
     Start-Sleep -Seconds $Seconds
 }
 
+function Invoke-RetryOperation {
+    <#
+    .SYNOPSIS
+    Unified retry helper with configurable backoff strategies.
+    
+    .DESCRIPTION
+    Executes a scriptblock with automatic retry logic. Supports both count-based 
+    and time-based termination, exponential backoff with optional jitter, and 
+    consistent status reporting.
+    
+    .PARAMETER ScriptBlock
+    The code to execute. Should return $true on success, $false on retriable failure.
+    
+    .PARAMETER MaxRetries
+    Maximum number of retry attempts (count-based mode). Mutually exclusive with TimeoutSeconds.
+    
+    .PARAMETER TimeoutSeconds
+    Maximum time to retry in seconds (time-based mode). Mutually exclusive with MaxRetries.
+    
+    .PARAMETER BaseDelaySeconds
+    Starting delay between retries. Used as fixed delay or base for exponential backoff.
+    
+    .PARAMETER UseExponentialBackoff
+    If true, delays grow exponentially (base 2). If false, uses fixed delay.
+    
+    .PARAMETER UseJitter
+    If true, adds random jitter (0-4 seconds) to each delay.
+    
+    .PARAMETER MaxDelaySeconds
+    Maximum delay cap for exponential backoff.
+    
+    .PARAMETER RetryMessage
+    Template message for retry attempts. Can include {attempt}, {max}, {delay} placeholders.
+    
+    .PARAMETER OperationName
+    Name of the operation for error messages.
+    
+    .EXAMPLE
+    Invoke-RetryOperation -ScriptBlock { Test-Something } -MaxRetries 10 -BaseDelaySeconds 5 -UseExponentialBackoff
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [scriptblock]$ScriptBlock,
+        
+        [int]$MaxRetries = 0,
+        [int]$TimeoutSeconds = 0,
+        [int]$BaseDelaySeconds = 10,
+        [switch]$UseExponentialBackoff,
+        [switch]$UseJitter,
+        [int]$MaxDelaySeconds = 120,
+        [string]$RetryMessage = "attempt {attempt}/{max}, wait {delay}s",
+        [string]$OperationName = "operation"
+    )
+    
+    # Validate parameters
+    if ($MaxRetries -eq 0 -and $TimeoutSeconds -eq 0) {
+        throw "Must specify either MaxRetries or TimeoutSeconds"
+    }
+    if ($MaxRetries -gt 0 -and $TimeoutSeconds -gt 0) {
+        throw "Cannot specify both MaxRetries and TimeoutSeconds"
+    }
+    
+    $attempt = 0
+    $deadline = if ($TimeoutSeconds -gt 0) { (Get-Date).AddSeconds($TimeoutSeconds) } else { $null }
+    
+    while ($true) {
+        $attempt++
+        
+        # Check termination conditions
+        if ($MaxRetries -gt 0 -and $attempt -gt $MaxRetries) {
+            throw "Operation '$OperationName' failed after $MaxRetries attempts"
+        }
+        if ($deadline -and (Get-Date) -ge $deadline) {
+            throw "Operation '$OperationName' timed out after $TimeoutSeconds seconds"
+        }
+        
+        # Execute the operation
+        try {
+            $result = & $ScriptBlock
+            if ($result -eq $true) {
+                return $true
+            }
+        } catch {
+            # Let scriptblock handle its own errors; we just retry
+        }
+        
+        # Don't wait after the last attempt
+        if ($MaxRetries -gt 0 -and $attempt -ge $MaxRetries) {
+            break
+        }
+        if ($deadline -and (Get-Date) -ge $deadline) {
+            break
+        }
+        
+        # Calculate delay
+        if ($UseExponentialBackoff) {
+            $delay = [Math]::Min($MaxDelaySeconds, $BaseDelaySeconds * [Math]::Pow(2, ($attempt - 1)))
+        } else {
+            $delay = $BaseDelaySeconds
+        }
+        
+        if ($UseJitter) {
+            $delay += (Get-Random -Minimum 0 -Maximum 4)
+        }
+        
+        $delay = [int][Math]::Round($delay)
+        
+        # Format and display retry message
+        $message = $RetryMessage
+        $message = $message -replace '\{attempt\}', $attempt
+        $message = $message -replace '\{max\}', $(if ($MaxRetries -gt 0) { $MaxRetries } else { "∞" })
+        $message = $message -replace '\{delay\}', $delay
+        
+        Write-StepStatus -Status Retrying -Detail $message
+        
+        Start-Sleep -Seconds $delay
+    }
+    
+    return $false
+}
+
 function Write-StepStatus {
     param(
         [string]$Step,
@@ -441,25 +552,38 @@ function Get-MI-DisplayName {
         [int]$BaseDelaySeconds = 6
     )
     
-    $lastErr = $null
-    for ($i = 1; $i -le $MaxRetries; $i++) {
-        try {
-            $dn = az ad sp show --id $PrincipalId --query displayName -o tsv 2>$null
-            if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($dn)) {
-                return $dn.Trim()
-            }
-
-            $lastErr = "displayName not found yet"
-        } catch {
-            $lastErr = $_.Exception.Message
-        }
-
-        $wait = [Math]::Min(120, $BaseDelaySeconds * [Math]::Pow(1.8, ($i - 1))) + (Get-Random -Minimum 0 -Maximum 4)
-    Write-Host "[Retrying] (service principal propagation; attempt $i/$MaxRetries, wait $($wait)`s)" -ForegroundColor DarkYellow
-        Start-Sleep -Seconds ([int][Math]::Round($wait))
+    $result = @{
+        DisplayName = $null
+        LastError = $null
     }
     
-    throw "Unable to resolve managed identity display name for SP '$PrincipalId' after $MaxRetries attempts. Last error: $lastErr"
+    $success = Invoke-RetryOperation `
+        -ScriptBlock {
+            try {
+                $dn = az ad sp show --id $PrincipalId --query displayName -o tsv 2>$null
+                if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($dn)) {
+                    $result.DisplayName = $dn.Trim()
+                    return $true
+                }
+                $result.LastError = "displayName not found yet"
+            } catch {
+                $result.LastError = $_.Exception.Message
+            }
+            return $false
+        } `
+        -MaxRetries $MaxRetries `
+        -BaseDelaySeconds $BaseDelaySeconds `
+        -UseExponentialBackoff `
+        -UseJitter `
+        -MaxDelaySeconds 120 `
+        -RetryMessage "service principal propagation; attempt {attempt}/{max}, wait {delay}s" `
+        -OperationName "Get-MI-DisplayName"
+    
+    if ($success) {
+        return $result.DisplayName
+    }
+    
+    throw "Unable to resolve managed identity display name for SP '$PrincipalId' after $MaxRetries attempts. Last error: $($result.LastError)"
 }
 
 function Invoke-AzCli {
@@ -634,187 +758,8 @@ try {
     [void](Test-AzureTokenExpiry -ExpiryBufferMinutes 5)
     
     # Detect parameter set mode
-    if ($PSCmdlet.ParameterSetName -eq 'UpdateImage') {
-        # ============================================================================
-        # UPDATE IMAGE MODE
-        # ============================================================================
-        $updateStartTime = Get-Date
-        $rg = $UpdateImage
-        
-        Write-Host "`n================================================================================" -ForegroundColor Cyan
-        Write-Host "  UPDATE IMAGE MODE" -ForegroundColor Cyan
-        Write-Host "================================================================================" -ForegroundColor Cyan
-        Write-Host "  Resource Group: $rg" -ForegroundColor White
-        Write-Host "  Config File:    $ConfigPath" -ForegroundColor White
-        Write-Host ""
-        
-        $estimatedFinishTime = (Get-Date).AddMinutes(3).ToString("HH:mm:ss")
-        Write-Host "Starting image update. Estimated time to complete: 3m (finish ~$estimatedFinishTime)" -ForegroundColor Cyan
-        
-        # Verify resource group exists
-        Write-StepStatus "Verifying resource group" "Started" "5s"
-        $rgCheckResult = Invoke-AzCli -Arguments @('group', 'exists', '--name', $rg)
-        if ($rgCheckResult.TrimmedText -ne 'true') {
-            Write-Host ""
-            Write-Host "ERROR: Resource group '$rg' does not exist" -ForegroundColor Red
-            Write-Host ""
-            exit 1
-        }
-        Write-StepStatus "" "Success" "Resource group exists"
-        
-        # Discover existing resources
-        Write-StepStatus "Discovering existing resources" "Started" "5s"
-        
-        # Find ACR
-    $acrListResult = Invoke-AzCli -Arguments @('acr', 'list', '--resource-group', $rg, '--query', "[?tags.author=='dab-demo' || tags.author=='dab-deploy-demo-script'].name", '--output', 'tsv')
-        if ([string]::IsNullOrWhiteSpace($acrListResult.TrimmedText)) {
-            Write-Host ""
-            Write-Host "ERROR: Azure Container Registry not found in '$rg'" -ForegroundColor Red
-            Write-Host ""
-            exit 1
-        }
-        $acrName = $acrListResult.TrimmedText.Trim()
-        Write-Host "  Found ACR: $acrName" -ForegroundColor Gray
-        
-        # Get ACR login server
-        $acrLoginServerResult = Invoke-AzCli -Arguments @('acr', 'show', '--name', $acrName, '--resource-group', $rg, '--query', 'loginServer', '--output', 'tsv')
-        OK $acrLoginServerResult "Failed to get ACR login server"
-        $acrLoginServer = $acrLoginServerResult.TrimmedText
-        
-        # Find Container App
-    $containerListResult = Invoke-AzCli -Arguments @('containerapp', 'list', '--resource-group', $rg, '--query', "[?tags.author=='dab-demo' || tags.author=='dab-deploy-demo-script'].name", '--output', 'tsv', '--only-show-errors')
-        if ([string]::IsNullOrWhiteSpace($containerListResult.TrimmedText)) {
-            Write-Host ""
-            Write-Host "ERROR: Container App not found in '$rg'" -ForegroundColor Red
-            Write-Host ""
-            exit 1
-        }
-        $container = $containerListResult.TrimmedText.Trim()
-        Write-Host "  Found Container App: $container" -ForegroundColor Gray
-        
-        Write-StepStatus "" "Success" "Resources discovered"
-        
-        # Compose new timestamp-based image tag
-        $imageTag = "$acrLoginServer/dab-baked:$runTimestamp"
-        Write-Host "  New image tag: $imageTag" -ForegroundColor Gray
-        
-        Write-StepStatus "Building updated DAB image" "Started" "40s"
-        $buildStartTime = Get-Date
-        
-        $buildArgs = @(
-            'acr', 'build',
-            '--resource-group', $rg,
-            '--registry', $acrName,
-            '--image', $imageTag,
-            '--file', 'Dockerfile',
-            '--build-arg', "DAB_VERSION=$DockerDabVersion",
-            '.'
-        )
-        $buildResult = Invoke-AzCli -Arguments $buildArgs
-        OK $buildResult "Failed to build updated DAB image"
-        
-        $buildElapsed = [math]::Round(((Get-Date) - $buildStartTime).TotalSeconds, 1)
-        Write-StepStatus "" "Success" "$imageTag ($($buildElapsed)`s)"
-        
-        # Update container app
-        Write-StepStatus "Updating container app with new image" "Started" "30s"
-        $updateAppStartTime = Get-Date
-        
-        $updateArgs = @(
-            'containerapp', 'update',
-            '--name', $container,
-            '--resource-group', $rg,
-            '--image', $imageTag
-        )
-        
-        $updateResult = Invoke-AzCli -Arguments $updateArgs
-        OK $updateResult "Failed to update container app"
-        
-        $updateElapsed = [math]::Round(((Get-Date) - $updateAppStartTime).TotalSeconds, 1)
-        Write-StepStatus "" "Success" "Container updated ($($updateElapsed)`s)"
-        
-        # Wait for new revision to become ready
-        Write-StepStatus "Waiting for new revision to become ready" "Started" "120s"
-        
-        $maxWaitMinutes = 2
-        $checkDeadline = (Get-Date).AddMinutes($maxWaitMinutes)
-        $revisionReady = $false
-        
-        while (-not $revisionReady -and (Get-Date) -lt $checkDeadline) {
-            Start-Sleep -Seconds 10
-            
-            $statusArgs = @('containerapp', 'show', '--name', $container, '--resource-group', $rg, '--query', '{running:properties.runningStatus,revision:properties.latestReadyRevisionName}', '--output', 'json')
-            $statusResult = Invoke-AzCli -Arguments $statusArgs
-            
-            if ($statusResult.ExitCode -eq 0) {
-                $cleanedJson = $statusResult.TrimmedText -replace '(?m)^WARNING:.*$', ''
-                $status = $cleanedJson.Trim() | ConvertFrom-Json
-                
-                if ($status.running -eq 'Running') {
-                    $revisionReady = $true
-                    Write-StepStatus "" "Success" "New revision ready: $($status.revision)"
-                }
-            }
-        }
-        
-        if (-not $revisionReady) {
-            throw "New revision did not become ready within $maxWaitMinutes minutes"
-        }
-        
-        # Get container URL
-        $fqdnResult = Invoke-AzCli -Arguments @('containerapp', 'show', '--name', $container, '--resource-group', $rg, '--query', 'properties.configuration.ingress.fqdn', '--output', 'tsv')
-        $cleanFqdn = ($fqdnResult.TrimmedText -split "`n" | Where-Object { $_ -notmatch '^WARNING:' }) -join ''
-        $containerUrl = "https://$($cleanFqdn.Trim())"
-        
-        # Health check
-        Write-StepStatus "Verifying DAB API health" "Started" "30s"
-        $healthCheckStartTime = Get-Date
-        $healthCheckPassed = $false
-        
-        for ($i = 1; $i -le 5; $i++) {
-            try {
-                $healthResponse = Invoke-RestMethod -Uri "$containerUrl/health" -TimeoutSec 10 -ErrorAction Stop
-                if ($healthResponse.status -eq "Healthy") {
-                    $healthElapsed = [math]::Round(((Get-Date) - $healthCheckStartTime).TotalSeconds, 1)
-                    Write-StepStatus "" "Success" "API is healthy ($($healthElapsed)`s)"
-                    $healthCheckPassed = $true
-                    break
-                }
-            } catch {
-                if ($i -lt 5) {
-                    Start-Sleep -Seconds 10
-                } else {
-                    Write-Host "  Warning: Health check failed after 5 attempts" -ForegroundColor Yellow
-                    Write-Host "  The container may still be starting up" -ForegroundColor Yellow
-                }
-            }
-        }
-        
-        # Summary
-        $totalTime = [math]::Round(((Get-Date) - $updateStartTime).TotalMinutes, 1)
-        
-        Write-Host "`n================================================================================" -ForegroundColor Green
-        Write-Host "  ✓ IMAGE UPDATE SUCCESSFUL" -ForegroundColor Green
-        Write-Host "================================================================================" -ForegroundColor Green
-        Write-Host ""
-        Write-Host "UPDATED RESOURCES" -ForegroundColor Cyan
-        Write-Host "  Resource Group:    $rg" -ForegroundColor White
-        Write-Host "  Container App:     $container" -ForegroundColor White
-        Write-Host "  New Image:         $imageTag" -ForegroundColor White
-        Write-Host "  API Endpoint:      $containerUrl" -ForegroundColor White
-        Write-Host ""
-        Write-Host "UPDATE INFO" -ForegroundColor Magenta
-    Write-Host "  Total time:        ${totalTime}m" -ForegroundColor White
-    Write-Host "  Build tag:         $runTimestamp" -ForegroundColor White
-        Write-Host "  Health check:      $(if ($healthCheckPassed) { 'Passed' } else { 'Skipped' })" -ForegroundColor White
-        Write-Host ""
-        Write-Host "================================================================================" -ForegroundColor Green
-        
-        exit 0
-    }
-    
     # ============================================================================
-    # DEPLOY MODE (original logic)
+    # DEPLOYMENT
     # ============================================================================
     $rg = "dab-demo-$runTimestamp"
     $acaEnv = "aca-environment"
@@ -916,22 +861,24 @@ try {
 
     if ($VerifyAdOnlyAuth) {
         Write-StepStatus "Verifying Entra ID-only authentication (optional check)" "Started" "180s"
-        $adOnlyReady = $false
         
-        for ($i = 1; $i -le 10; $i++) {
-            $adOnlyStateArgs = @('sql', 'server', 'ad-only-auth', 'get', '--resource-group', $rg, '--server-name', $sqlServer, '--query', 'azureAdOnlyAuthentication', '--output', 'tsv')
-            $adOnlyStateResult = Invoke-AzCli -Arguments $adOnlyStateArgs
-            
-            if ($adOnlyStateResult.ExitCode -eq 0 -and $adOnlyStateResult.TrimmedText -eq 'true') {
-                $adOnlyReady = $true
-                Write-StepStatus "" "Success" "active"
-                break
-            }
-            
-            $delay = [Math]::Min(120, 5 * [Math]::Pow(1.7, $i))
-            Write-StepStatus "" "Retrying" "attempt $i/10, waiting ${delay}s"
-            Start-Sleep -Seconds ([int]$delay)
-        }
+        $adOnlyReady = Invoke-RetryOperation `
+            -ScriptBlock {
+                $adOnlyStateArgs = @('sql', 'server', 'ad-only-auth', 'get', '--resource-group', $rg, '--server-name', $sqlServer, '--query', 'azureAdOnlyAuthentication', '--output', 'tsv')
+                $adOnlyStateResult = Invoke-AzCli -Arguments $adOnlyStateArgs
+                
+                if ($adOnlyStateResult.ExitCode -eq 0 -and $adOnlyStateResult.TrimmedText -eq 'true') {
+                    Write-StepStatus "" "Success" "active"
+                    return $true
+                }
+                return $false
+            } `
+            -MaxRetries 10 `
+            -BaseDelaySeconds 5 `
+            -UseExponentialBackoff `
+            -MaxDelaySeconds 120 `
+            -RetryMessage "attempt {attempt}/{max}, waiting {delay}s" `
+            -OperationName "AD-only auth verification"
         
         if (-not $adOnlyReady) {
             Write-StepStatus "" "Info" "not confirmed after 10 attempts, proceeding anyway"
@@ -1010,61 +957,71 @@ try {
     if (Test-Path $DatabasePath) {
         Write-StepStatus "Deploying database schema" "Started" "30s"
         $schemaStartTime = Get-Date
-        $schemaRetries = 0
-        $maxSchemaRetries = 3
-        $schemaSuccess = $false
+        $schemaResult = @{
+            LastError = $null
+            LastOutput = $null
+            AttemptCount = 0
+        }
         
-        while (-not $schemaSuccess -and $schemaRetries -lt $maxSchemaRetries) {
-            $schemaRetries++
-            
-            $sqlcmdOutput = sqlcmd -S $sqlServerFqdn -d $sqlDb -G -i $DatabasePath 2>&1 | Out-String
-            $sqlExit = $LASTEXITCODE
-            
-            $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-            
-            if ($sqlExit -eq 0) {
-                Add-Content -Path $script:CliLog -Value "[$timestamp] [OK] sqlcmd -S $sqlServerFqdn -d $sqlDb -G -i $DatabasePath`n$sqlcmdOutput`n"
-                $schemaElapsed = [math]::Round(((Get-Date) - $schemaStartTime).TotalSeconds, 1)
-                Write-StepStatus "" "Success" "schema deployed to $sqlDb ($($schemaElapsed)`s)"
-                $schemaSuccess = $true
-            } else {
-                Add-Content -Path $script:CliLog -Value "[$timestamp] [ERR] sqlcmd -S $sqlServerFqdn -d $sqlDb -G -i $DatabasePath (attempt $schemaRetries/$maxSchemaRetries)`n$sqlcmdOutput`n"
+        $schemaSuccess = Invoke-RetryOperation `
+            -ScriptBlock {
+                $schemaResult.AttemptCount++
                 
-                $isAdAuthError = $sqlcmdOutput -match "Login failed.*AzureAD" -or 
-                                 $sqlcmdOutput -match "Azure.*authentication.*not.*ready" -or
-                                 $sqlcmdOutput -match "configured for Azure AD only authentication"
+                $sqlcmdOutput = sqlcmd -S $sqlServerFqdn -d $sqlDb -G -i $DatabasePath 2>&1 | Out-String
+                $sqlExit = $LASTEXITCODE
+                $schemaResult.LastOutput = $sqlcmdOutput
                 
-                $isPermissionError = $sqlcmdOutput -match "permission.*denied" -or
-                                    $sqlcmdOutput -match "The user does not have permission"
+                $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
                 
-                if ($schemaRetries -lt $maxSchemaRetries -and $isAdAuthError) {
-                    $waitSeconds = 15
-                    Write-StepStatus "" "Retrying" "Azure AD auth not ready, attempt $schemaRetries/$maxSchemaRetries, waiting ${waitSeconds}s"
-                    Start-Sleep -Seconds $waitSeconds
-                } elseif ($isPermissionError) {
-                    Write-StepStatus "" "Error" "Permission denied. User $currentUserName may lack CREATE TABLE or ALTER permissions"
-                    Write-Host "`nTroubleshooting:" -ForegroundColor Yellow
-                    Write-Host "  - Verify $currentUserName is set as SQL Server admin" -ForegroundColor White
-                    Write-Host "  - Check firewall allows your IP" -ForegroundColor White
-                    Write-Host "  - Ensure database.sql has valid permissions" -ForegroundColor White
-                    throw "Database schema deployment failed: Permission denied (exit code $sqlExit)"
-                } elseif ($schemaRetries -ge $maxSchemaRetries) {
-                    Write-StepStatus "" "Error" "Failed after $maxSchemaRetries attempts (exit code $sqlExit)"
-                    Write-Host "`nError details from sqlcmd:" -ForegroundColor Yellow
-                    Write-Host $sqlcmdOutput -ForegroundColor DarkYellow
-                    Write-Host "`nTroubleshooting:" -ForegroundColor Yellow
-                    Write-Host "  - Check logs: $script:CliLog" -ForegroundColor White
-                    Write-Host "  - Verify Azure AD authentication: az sql server ad-only-auth get -g $rg -n $sqlServer" -ForegroundColor White
-                    Write-Host "  - Test connectivity: sqlcmd -S $sqlServerFqdn -d $sqlDb -G -Q 'SELECT @@VERSION'" -ForegroundColor White
-                    if ($isAdAuthError) {
-                        Write-Host "  - Azure AD auth error detected. Try running with -VerifyAdOnlyAuth flag" -ForegroundColor Cyan
-                    }
-                    throw "Database schema deployment failed after $maxSchemaRetries attempts (exit code $sqlExit)"
+                if ($sqlExit -eq 0) {
+                    Add-Content -Path $script:CliLog -Value "[$timestamp] [OK] sqlcmd -S $sqlServerFqdn -d $sqlDb -G -i $DatabasePath`n$sqlcmdOutput`n"
+                    $schemaElapsed = [math]::Round(((Get-Date) - $schemaStartTime).TotalSeconds, 1)
+                    Write-StepStatus "" "Success" "schema deployed to $sqlDb ($($schemaElapsed)`s)"
+                    return $true
                 } else {
-                    Write-StepStatus "" "Error" "sqlcmd exit code $sqlExit. See $script:CliLog"
-                    throw "Database schema deployment failed with exit code $sqlExit"
+                    Add-Content -Path $script:CliLog -Value "[$timestamp] [ERR] sqlcmd -S $sqlServerFqdn -d $sqlDb -G -i $DatabasePath (attempt $($schemaResult.AttemptCount)/3)`n$sqlcmdOutput`n"
+                    
+                    $isAdAuthError = $sqlcmdOutput -match "Login failed.*AzureAD" -or 
+                                     $sqlcmdOutput -match "Azure.*authentication.*not.*ready" -or
+                                     $sqlcmdOutput -match "configured for Azure AD only authentication"
+                    
+                    $isPermissionError = $sqlcmdOutput -match "permission.*denied" -or
+                                        $sqlcmdOutput -match "The user does not have permission"
+                    
+                    if ($isPermissionError) {
+                        Write-StepStatus "" "Error" "Permission denied. User $currentUserName may lack CREATE TABLE or ALTER permissions"
+                        Write-Host "`nTroubleshooting:" -ForegroundColor Yellow
+                        Write-Host "  - Verify $currentUserName is set as SQL Server admin" -ForegroundColor White
+                        Write-Host "  - Check firewall allows your IP" -ForegroundColor White
+                        Write-Host "  - Ensure database.sql has valid permissions" -ForegroundColor White
+                        throw "Database schema deployment failed: Permission denied (exit code $sqlExit)"
+                    }
+                    
+                    if (-not $isAdAuthError) {
+                        # Non-retriable error
+                        Write-StepStatus "" "Error" "sqlcmd exit code $sqlExit. See $script:CliLog"
+                        throw "Database schema deployment failed with exit code $sqlExit"
+                    }
+                    
+                    $schemaResult.LastError = "Azure AD auth not ready (exit code $sqlExit)"
+                    return $false
                 }
-            }
+            } `
+            -MaxRetries 3 `
+            -BaseDelaySeconds 15 `
+            -RetryMessage "Azure AD auth not ready, attempt {attempt}/{max}, waiting {delay}s" `
+            -OperationName "database schema deployment"
+        
+        if (-not $schemaSuccess) {
+            Write-StepStatus "" "Error" "Failed after 3 attempts"
+            Write-Host "`nError details from sqlcmd:" -ForegroundColor Yellow
+            Write-Host $schemaResult.LastOutput -ForegroundColor DarkYellow
+            Write-Host "`nTroubleshooting:" -ForegroundColor Yellow
+            Write-Host "  - Check logs: $script:CliLog" -ForegroundColor White
+            Write-Host "  - Verify Azure AD authentication: az sql server ad-only-auth get -g $rg -n $sqlServer" -ForegroundColor White
+            Write-Host "  - Test connectivity: sqlcmd -S $sqlServerFqdn -d $sqlDb -G -Q 'SELECT @@VERSION'" -ForegroundColor White
+            Write-Host "  - Azure AD auth error detected. Try running with -VerifyAdOnlyAuth flag" -ForegroundColor Cyan
+            throw "Database schema deployment failed after 3 attempts: $($schemaResult.LastError)"
         }
     } else {
         throw "database.sql file validation failed at path: $DatabasePath"
@@ -1290,17 +1247,18 @@ try {
     $sqlUserName = $spDisplayName
     
     $sqlStartTime = Get-Date
-    $retries = 0
-    $maxRetries = 12
-    $success = $false
+    $sqlResult = @{
+        LastExit = 0
+        LastOutput = $null
+    }
     
     Write-StepStatus "Granting managed identity access to SQL Database" "Started" "10s"
     
-    while (-not $success -and $retries -lt $maxRetries) {
-        $retries++
-        try {
-            $escapedUserName = $sqlUserName.Replace("'", "''")
-            $sqlQuery = @"
+    $success = Invoke-RetryOperation `
+        -ScriptBlock {
+            try {
+                $escapedUserName = $sqlUserName.Replace("'", "''")
+                $sqlQuery = @"
 BEGIN TRY
     IF NOT EXISTS (SELECT * FROM sys.database_principals WHERE name = '$escapedUserName')
         CREATE USER [$sqlUserName] FROM EXTERNAL PROVIDER;
@@ -1315,38 +1273,40 @@ BEGIN CATCH
     THROW;
 END CATCH
 "@
-            $sqlcmdOutput = sqlcmd -S $sqlServerFqdn -d $sqlDb -G -Q $sqlQuery 2>&1 | Out-String
-            $sqlExit = $LASTEXITCODE
-            
-            # Check both exit code AND output for success message
-            $success = $sqlExit -eq 0 -and $sqlcmdOutput -match 'PERMISSION_GRANT_SUCCESS'
-            
-            if (-not $success) {
+                $sqlcmdOutput = sqlcmd -S $sqlServerFqdn -d $sqlDb -G -Q $sqlQuery 2>&1 | Out-String
+                $sqlExit = $LASTEXITCODE
+                $sqlResult.LastExit = $sqlExit
+                $sqlResult.LastOutput = $sqlcmdOutput
+                
+                # Check both exit code AND output for success message
+                if ($sqlExit -eq 0 -and $sqlcmdOutput -match 'PERMISSION_GRANT_SUCCESS') {
+                    return $true
+                }
+                
                 if ($sqlcmdOutput) {
                     Write-StepStatus "" "Info" "SQL output: $sqlcmdOutput"
                 }
                 if ($sqlExit -ne 0) {
                     Write-StepStatus "" "Info" "SQL exit code: $sqlExit"
                 }
+                return $false
+            } catch {
+                Write-StepStatus "" "Info" "SQL error: $($_.Exception.Message)"
+                return $false
             }
-        } catch {
-            Write-StepStatus "" "Info" "SQL error: $($_.Exception.Message)"
-            $success = $false
-        }
-        
-        if (-not $success -and $retries -lt $maxRetries) {
-            $baseWaitSeconds = [Math]::Min(240, 20 * [Math]::Pow(2, $retries - 1))
-            $jitter = Get-Random -Minimum 1 -Maximum 6
-            $waitSeconds = $baseWaitSeconds + $jitter
-            Write-StepStatus "" "Retrying" "attempt ${retries}/${maxRetries}, waiting ${waitSeconds}s"
-            Wait-Seconds $waitSeconds "SQL MI propagation"
-        }
-    }
+        } `
+        -MaxRetries 12 `
+        -BaseDelaySeconds 20 `
+        -UseExponentialBackoff `
+        -UseJitter `
+        -MaxDelaySeconds 240 `
+        -RetryMessage "attempt {attempt}/{max}, waiting {delay}s" `
+        -OperationName "SQL MI access grant"
     
     if (-not $success) {
         $sqlElapsed = [math]::Round(((Get-Date) - $sqlStartTime).TotalSeconds, 0)
-        Write-StepStatus "" "Error" "Failed after $maxRetries attempts ($($sqlElapsed)s, exit code: $sqlExit)"
-        throw "Failed to grant SQL access after $maxRetries attempts. MI may not be propagated to SQL Server's Entra cache (exit code: $sqlExit)" 
+        Write-StepStatus "" "Error" "Failed after 12 attempts ($($sqlElapsed)s, exit code: $($sqlResult.LastExit))"
+        throw "Failed to grant SQL access after 12 attempts. MI may not be propagated to SQL Server's Entra cache (exit code: $($sqlResult.LastExit))" 
     }
     
     $sqlElapsed = [math]::Round(((Get-Date) - $sqlStartTime).TotalSeconds, 0)
@@ -1425,57 +1385,56 @@ WHERE dp.name = '$escapedUserName';
     }
     
     Write-StepStatus "Verifying container is running" "Started" "300s"
-    $containerRunning = $false
-    $maxWaitMinutes = 5
-    $checkDeadline = (Get-Date).AddMinutes($maxWaitMinutes)
-    $checkAttempt = 0
     $verifyStartTime = Get-Date
     
-    while (-not $containerRunning -and (Get-Date) -lt $checkDeadline) {
-        $checkAttempt++
-        Start-Sleep -Seconds 10
-        
-        $statusArgs = @('containerapp', 'show', '--name', $container, '--resource-group', $rg, '--query', '{provisioning:properties.provisioningState,running:properties.runningStatus}', '--output', 'json')
-        $statusResult = Invoke-AzCli -Arguments $statusArgs
-        
-        if ($statusResult.ExitCode -eq 0) {
-            # Sanitize WARNING text from containerapp extension before parsing JSON
-            $cleanedJson = $statusResult.TrimmedText -replace '(?m)^WARNING:.*$', ''
-            $cleanedJson = $cleanedJson.Trim()
+    $containerRunning = Invoke-RetryOperation `
+        -ScriptBlock {
+            $statusArgs = @('containerapp', 'show', '--name', $container, '--resource-group', $rg, '--query', '{provisioning:properties.provisioningState,running:properties.runningStatus}', '--output', 'json')
+            $statusResult = Invoke-AzCli -Arguments $statusArgs
             
-            if (-not [string]::IsNullOrWhiteSpace($cleanedJson)) {
-                $status = $cleanedJson | ConvertFrom-Json
-            
-                if ($status.provisioning -eq 'Succeeded' -and $status.running -eq 'Running') {
-                    $replicaArgs = @('containerapp', 'replica', 'list', '--name', $container, '--resource-group', $rg, '--query', '[0].properties.containers[0].restartCount', '--output', 'tsv')
-                    $replicaResult = Invoke-AzCli -Arguments $replicaArgs
+            if ($statusResult.ExitCode -eq 0) {
+                # Sanitize WARNING text from containerapp extension before parsing JSON
+                $cleanedJson = $statusResult.TrimmedText -replace '(?m)^WARNING:.*$', ''
+                $cleanedJson = $cleanedJson.Trim()
                 
-                    if ($replicaResult.ExitCode -eq 0) {
-                        # Remove WARNING lines and extract numeric value
-                        $restartCountRaw = $replicaResult.TrimmedText
-                        $restartCount = ($restartCountRaw -split "`n" | Where-Object { $_ -match '^\d+$' }) | Select-Object -First 1
-                        
-                        if (-not $restartCount) { $restartCount = 0 }
-                        [int]$restartCount = $restartCount
+                if (-not [string]::IsNullOrWhiteSpace($cleanedJson)) {
+                    $status = $cleanedJson | ConvertFrom-Json
+                
+                    if ($status.provisioning -eq 'Succeeded' -and $status.running -eq 'Running') {
+                        $replicaArgs = @('containerapp', 'replica', 'list', '--name', $container, '--resource-group', $rg, '--query', '[0].properties.containers[0].restartCount', '--output', 'tsv')
+                        $replicaResult = Invoke-AzCli -Arguments $replicaArgs
                     
-                        if ($restartCount -lt 3) {
-                            $containerRunning = $true
-                            $verifyElapsed = [math]::Round(((Get-Date) - $verifyStartTime).TotalSeconds, 1)
-                            Write-StepStatus "" "Success" "$container running with restart count $restartCount ($($verifyElapsed)`s)"
-                        } else {
-                            Write-StepStatus "" "Info" "Container in crash loop (restart count: $restartCount)"
+                        if ($replicaResult.ExitCode -eq 0) {
+                            # Remove WARNING lines and extract numeric value
+                            $restartCountRaw = $replicaResult.TrimmedText
+                            $restartCount = ($restartCountRaw -split "`n" | Where-Object { $_ -match '^\d+$' }) | Select-Object -First 1
+                            
+                            if (-not $restartCount) { $restartCount = 0 }
+                            [int]$restartCount = $restartCount
+                        
+                            if ($restartCount -lt 3) {
+                                $verifyElapsed = [math]::Round(((Get-Date) - $verifyStartTime).TotalSeconds, 1)
+                                Write-StepStatus "" "Success" "$container running with restart count $restartCount ($($verifyElapsed)`s)"
+                                return $true
+                            } else {
+                                Write-StepStatus "" "Info" "Container in crash loop (restart count: $restartCount)"
+                            }
                         }
                     }
                 }
             }
-        }
-    }
+            return $false
+        } `
+        -TimeoutSeconds 300 `
+        -BaseDelaySeconds 10 `
+        -RetryMessage "checking container status (attempt {attempt})" `
+        -OperationName "container running verification"
     
     if (-not $containerRunning) {
         $logsArgs = @('containerapp', 'logs', 'show', '--name', $container, '--resource-group', $rg, '--tail', '50')
         $logsResult = Invoke-AzCli -Arguments $logsArgs
         $logOutput = if ($logsResult.TrimmedText) { $logsResult.TrimmedText } else { "No logs available" }
-        throw "Container did not reach Running state within $maxWaitMinutes minutes. Recent logs:`n$logOutput"
+        throw "Container did not reach Running state within 5 minutes. Recent logs:`n$logOutput"
     }
 
     $containerShowArgs = @('containerapp', 'show', '--name', $container, '--resource-group', $rg, '--query', 'properties.configuration.ingress.fqdn', '--output', 'tsv')
@@ -1493,55 +1452,44 @@ WHERE dp.name = '$escapedUserName';
         Write-Host "  Waiting 15s for container to stabilize..." -ForegroundColor Gray
         Start-Sleep -Seconds 15
         
-        $healthAttempts = 10
-        $waitBetweenRetries = 15
-        $healthCheckPassed = $false
-        
-        for ($healthRetry = 1; $healthRetry -le $healthAttempts; $healthRetry++) {
-            try {
-                $healthUrl = "$containerUrl/health"
-                $healthResponse = Invoke-RestMethod -Uri $healthUrl -TimeoutSec 10 -ErrorAction Stop
-                
-                if ($healthResponse.status -eq "Healthy") {
-                    $healthElapsed = [math]::Round(((Get-Date) - $healthCheckStartTime).TotalSeconds, 1)
-                    Write-StepStatus "" "Success" "DAB API health: Healthy ($($healthElapsed)`s)"
-                    $healthCheckPassed = $true
-                    break
-                } elseif ($healthResponse.status -eq "Unhealthy") {
-                    $dbCheck = $healthResponse.checks | Where-Object { $_.tags -contains "data-source" } | Select-Object -First 1
-                    if ($dbCheck -and $dbCheck.status -eq "Healthy") {
-                        $healthElapsed = [math]::Round(((Get-Date) - $healthCheckStartTime).TotalSeconds, 1)
-                        Write-StepStatus "" "Success" "DAB API responding, database connection healthy ($($healthElapsed)`s)"
-                        $healthCheckPassed = $true
-                        break
-                    } else {
-                        if ($healthRetry -lt $healthAttempts) {
-                            Write-StepStatus "" "Retrying" "health status: $($healthResponse.status), attempt $healthRetry/$healthAttempts, waiting ${waitBetweenRetries}s"
-                            Start-Sleep -Seconds $waitBetweenRetries
-                        } else {
-                            Write-StepStatus "" "Info" "health status: $($healthResponse.status) after $healthAttempts attempts - database may need verification"
-                        }
-                    }
-                } else {
-                    if ($healthRetry -lt $healthAttempts) {
-                        Write-StepStatus "" "Retrying" "health status: $($healthResponse.status), attempt $healthRetry/$healthAttempts, waiting ${waitBetweenRetries}s"
-                        Start-Sleep -Seconds $waitBetweenRetries
-                    }
-                }
-            } catch {
-                if ($healthRetry -lt $healthAttempts) {
-                    Write-StepStatus "" "Retrying" "unable to reach health endpoint, attempt $healthRetry/$healthAttempts, waiting ${waitBetweenRetries}s"
-                    Start-Sleep -Seconds $waitBetweenRetries
-                } else {
-                    $healthElapsed = [math]::Round(((Get-Date) - $healthCheckStartTime).TotalSeconds, 1)
-                    Write-StepStatus "" "Info" "Unable to verify DAB API health after $healthAttempts attempts ($($healthElapsed)`s)"
-                    Write-Host "  Health endpoint: $healthUrl" -ForegroundColor DarkGray
-                    Write-Host "  Container may still be starting - check logs if needed" -ForegroundColor DarkGray
-                }
-            }
+        $healthUrl = "$containerUrl/health"
+        $healthResult = @{ 
+            Passed = $false
+            FinalAttempt = $false
         }
         
-        if (-not $healthCheckPassed) {
+        $healthResult.Passed = Invoke-RetryOperation `
+            -ScriptBlock {
+                try {
+                    $healthResponse = Invoke-RestMethod -Uri $healthUrl -TimeoutSec 10 -ErrorAction Stop
+                    
+                    if ($healthResponse.status -eq "Healthy") {
+                        $healthElapsed = [math]::Round(((Get-Date) - $healthCheckStartTime).TotalSeconds, 1)
+                        Write-StepStatus "" "Success" "DAB API health: Healthy ($($healthElapsed)`s)"
+                        return $true
+                    } elseif ($healthResponse.status -eq "Unhealthy") {
+                        $dbCheck = $healthResponse.checks | Where-Object { $_.tags -contains "data-source" } | Select-Object -First 1
+                        if ($dbCheck -and $dbCheck.status -eq "Healthy") {
+                            $healthElapsed = [math]::Round(((Get-Date) - $healthCheckStartTime).TotalSeconds, 1)
+                            Write-StepStatus "" "Success" "DAB API responding, database connection healthy ($($healthElapsed)`s)"
+                            return $true
+                        }
+                    }
+                    return $false
+                } catch {
+                    return $false
+                }
+            } `
+            -MaxRetries 10 `
+            -BaseDelaySeconds 15 `
+            -RetryMessage "health check attempt {attempt}/{max}, waiting {delay}s" `
+            -OperationName "DAB API health check"
+        
+        if (-not $healthResult.Passed) {
+            $healthElapsed = [math]::Round(((Get-Date) - $healthCheckStartTime).TotalSeconds, 1)
+            Write-StepStatus "" "Info" "Unable to verify DAB API health after 10 attempts ($($healthElapsed)`s)"
+            Write-Host "  Health endpoint: $healthUrl" -ForegroundColor DarkGray
+            Write-Host "  Container may still be starting - check logs if needed" -ForegroundColor DarkGray
             Write-StepStatus "" "Info" "Health not yet Healthy; continuing"
         }
     } else {
@@ -1595,24 +1543,13 @@ WHERE dp.name = '$escapedUserName';
 } catch {
     Write-Host "`n"
     Write-Host ("=" * 85) -ForegroundColor Red
-    
-    # Show appropriate header based on mode
-    if ($PSCmdlet.ParameterSetName -eq 'UpdateImage') {
-        Write-Host "UPDATE FAILED" -ForegroundColor Red -BackgroundColor Black
-    } else {
-        Write-Host "DEPLOYMENT FAILED - ROLLING BACK" -ForegroundColor Red -BackgroundColor Black
-    }
-    
+    Write-Host "DEPLOYMENT FAILED - ROLLING BACK" -ForegroundColor Red -BackgroundColor Black
     Write-Host ("=" * 85) -ForegroundColor Red
     
     $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
     Add-Content -Path $script:CliLog -Value "[$timestamp] [ERR] DEPLOYMENT FAILED`n$($_.Exception.Message)`n$($_.ScriptStackTrace)`n"
     
-    # Only cleanup in Deploy mode, NEVER in UpdateImage mode
-    if ($PSCmdlet.ParameterSetName -eq 'UpdateImage') {
-        Write-Host "`nUpdate failed - resource group preserved (UpdateImage mode never deletes resources)" -ForegroundColor Yellow
-        Write-Host "Resource group: $rg" -ForegroundColor Cyan
-    } elseif (-not $NoCleanup -and $rg) {
+    if (-not $NoCleanup -and $rg) {
         Write-Host "`nCleaning up partial deployment..." -ForegroundColor Yellow
         
         $deleteArgs = @('group', 'delete', '--name', $rg, '--yes', '--no-wait')
