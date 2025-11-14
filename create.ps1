@@ -11,9 +11,7 @@
 #   -AcrName: Custom name for Azure Container Registry (default: dabdemoTIMESTAMP)
 #   -LogAnalyticsName: Custom name for Log Analytics workspace (default: log-workspace)
 #   -ContainerEnvironmentName: Custom name for Container App Environment (default: aca-environment)
-#   -McpInspectorName: Custom name for MCP Inspector container (default: mcp-inspector)
 #   -SqlCommanderName: Custom name for SQL Commander container (default: sql-commander)
-#   -NoMcpInspector: Skip MCP Inspector deployment (default: deploy MCP Inspector)
 #   -NoSqlCommander: Skip SQL Commander deployment (default: deploy SQL Commander)
 #   -NoCleanup: Preserve resource group on failure for debugging (default: auto-cleanup)
 #
@@ -22,7 +20,6 @@
 #   The Dockerfile must be present in the current directory.
 #   To update an existing deployment, use update.ps1 instead.
 #   Resource names are automatically validated and sanitized according to Azure naming rules.
-#   MCP Inspector is deployed by default to test the DAB MCP endpoint at /mcp.
 #   SQL Commander is deployed by default with Azure AD authentication to Azure SQL Database.
 #
 # Examples:
@@ -31,9 +28,8 @@
 #   .\create.ps1 -Region westeurope -DatabasePath ".\databases\prod.sql" -ConfigPath ".\configs\prod.json"
 #   .\create.ps1 -ResourceGroupName "my-dab-rg" -SqlServerName "my-sql-server"  # Custom names
 #   .\create.ps1 -ContainerAppName "my-api" -AcrName "myregistry123"  # Mix custom and default names
-#   .\create.ps1 -NoMcpInspector  # Skip MCP Inspector deployment
 #   .\create.ps1 -NoSqlCommander  # Skip SQL Commander deployment
-#   .\create.ps1 -McpInspectorName "my-inspector" -SqlCommanderName "my-sql-cmd"  # Custom names
+#   .\create.ps1 -SqlCommanderName "my-sql-cmd"  # Custom SQL Commander name
 #   .\create.ps1 -NoCleanup  # Keep resources on failure for debugging
 #
 param(
@@ -57,11 +53,7 @@ param(
     
     [string]$ContainerEnvironmentName = "",
     
-    [string]$McpInspectorName = "",
-    
     [string]$SqlCommanderName = "",
-    
-    [switch]$NoMcpInspector,
     
     [switch]$NoSqlCommander,
     
@@ -83,7 +75,7 @@ if ($UnknownArgs) {
     exit 1
 }
 
-$ScriptVersion = "0.6.4"  # v0.6.4: Add fail-fast logic for duplicate display name errors (no retry on non-retryable SQL errors)
+$ScriptVersion = "0.7.0"  # v0.7.0: Removed MCP Inspector deployment (not working reliably)
 $MinimumDabVersion = "1.7.81-rc"  # Minimum required DAB CLI version (note: comparison strips -rc suffix)
 $DockerDabVersion = $MinimumDabVersion   # DAB container image tag to bake into ACR build
 
@@ -667,7 +659,7 @@ function Write-DeploymentSummary {
     param(
         $ResourceGroup, $Region, $SqlServer, $SqlDatabase, $Container, $ContainerUrl,
         $LogAnalytics, $Environment, $CurrentUser, $DatabaseType, $TotalTime, $ClientIp, $SqlServerFqdn, $FirewallRuleName,
-        $McpInspector, $McpInspectorUrl, $SqlCommander, $SqlCommanderUrl, $DabMcpEndpoint
+        $SqlCommander, $SqlCommanderUrl
     )
     
     $subscriptionIdResult = Invoke-AzCli -Arguments @('account', 'show', '--query', 'id', '--output', 'tsv')
@@ -685,10 +677,6 @@ function Write-DeploymentSummary {
     Write-Host "  Database:          $SqlDatabase ($DatabaseType)"
     Write-Host "  Container App:     $Container"
     
-    if ($McpInspector -and $McpInspectorUrl -ne "Not deployed") {
-        Write-Host "  MCP Inspector:     $McpInspector"
-    }
-    
     if ($SqlCommander -and $SqlCommanderUrl -ne "Not deployed") {
         Write-Host "  SQL Commander:     $SqlCommander"
     }
@@ -698,11 +686,6 @@ function Write-DeploymentSummary {
     Write-Host "  Swagger:           $ContainerUrl/swagger"
     Write-Host "  GraphQL:           $ContainerUrl/graphql"
     Write-Host "  Health:            $ContainerUrl/health"
-    Write-Host "  MCP Endpoint:      $DabMcpEndpoint"
-    
-    if ($McpInspector -and $McpInspectorUrl -ne "Not deployed") {
-        Write-Host "  MCP Inspector:     $McpInspectorUrl"
-    }
     
     if ($SqlCommander -and $SqlCommanderUrl -ne "Not deployed") {
         Write-Host "  SQL Commander:     $SqlCommanderUrl"
@@ -989,9 +972,9 @@ try {
     }
     
     if ([string]::IsNullOrWhiteSpace($AcrName)) {
-        # ACR needs special handling - strip non-alphanumeric characters
-        $acrPrefix = $defaultPrefix -replace '[^a-zA-Z0-9]', ''
-        $AcrName = "${acrPrefix}$runTimestamp"
+        # ACR needs special handling - strip non-alphanumeric characters and enforce lowercase
+        $acrPrefix = ($defaultPrefix -replace '[^a-zA-Z0-9]', '').ToLower()
+        $AcrName = "${acrPrefix}$runTimestamp".ToLower()
     }
     
     if ([string]::IsNullOrWhiteSpace($LogAnalyticsName)) {
@@ -1000,10 +983,6 @@ try {
     
     if ([string]::IsNullOrWhiteSpace($ContainerEnvironmentName)) {
         $ContainerEnvironmentName = "aca-environment"
-    }
-    
-    if ([string]::IsNullOrWhiteSpace($McpInspectorName)) {
-        $McpInspectorName = "mcp-inspector"
     }
     
     if ([string]::IsNullOrWhiteSpace($SqlCommanderName)) {
@@ -1018,7 +997,6 @@ try {
     $acrName = Assert-AzureResourceName -Name $AcrName -ResourceType 'ACR'
     $logAnalytics = Assert-AzureResourceName -Name $LogAnalyticsName -ResourceType 'LogAnalytics'
     $acaEnv = Assert-AzureResourceName -Name $ContainerEnvironmentName -ResourceType 'ContainerEnvironment'
-    $mcpInspector = Assert-AzureResourceName -Name $McpInspectorName -ResourceType 'ContainerApp'
     $sqlCommander = Assert-AzureResourceName -Name $SqlCommanderName -ResourceType 'ContainerApp'
 
     Write-StepStatus "Creating resource group" "Started" "5s"
@@ -1391,7 +1369,9 @@ try {
     $principalIdArgs = @('containerapp', 'show', '--name', $container, '--resource-group', $rg, '--query', 'identity.principalId', '--output', 'tsv')
     $principalIdResult = Invoke-AzCli -Arguments $principalIdArgs
     OK $principalIdResult "Failed to retrieve MI principal ID"
-    $principalId = $principalIdResult.TrimmedText -replace 'WARNING:.*', '' -replace '\s+', ''
+    # Remove WARNING lines and strip all whitespace from GUID
+    $principalId = ($principalIdResult.TrimmedText -split "`n" | Where-Object { $_ -notmatch '^WARNING:' }) -join ''
+    $principalId = $principalId -replace '\s+', ''
     if ([string]::IsNullOrWhiteSpace($principalId)) {
         throw "Managed identity principal ID is empty or null"
     }
@@ -1404,7 +1384,8 @@ try {
     $acrIdArgs = @('acr', 'show', '--name', $acrName, '--resource-group', $rg, '--query', 'id', '--output', 'tsv')
     $acrIdResult = Invoke-AzCli -Arguments $acrIdArgs
     OK $acrIdResult "Failed to retrieve ACR resource ID"
-    $acrId = $acrIdResult.TrimmedText -replace 'WARNING:.*', '' -replace '\s+', ' '
+    # Remove WARNING lines but preserve resource ID format (don't collapse whitespace)
+    $acrId = ($acrIdResult.TrimmedText -split "`n" | Where-Object { $_ -notmatch '^WARNING:' }) -join ''
     $acrId = $acrId.Trim()
     
     $roleAssignArgs = @('role', 'assignment', 'create', '--assignee', $principalId, '--role', 'AcrPull', '--scope', $acrId)
@@ -1435,14 +1416,16 @@ try {
     $success = Invoke-RetryOperation `
         -ScriptBlock {
             try {
+                # Escape for both string literals and bracket identifiers in T-SQL
                 $escapedUserName = $sqlUserName.Replace("'", "''")
+                $escapedBracketName = $sqlUserName.Replace("]", "]]")
                 $sqlQuery = @"
 BEGIN TRY
     IF NOT EXISTS (SELECT * FROM sys.database_principals WHERE name = '$escapedUserName')
-        CREATE USER [$sqlUserName] FROM EXTERNAL PROVIDER;
-    ALTER ROLE db_datareader ADD MEMBER [$sqlUserName];
-    ALTER ROLE db_datawriter ADD MEMBER [$sqlUserName];
-    GRANT EXECUTE TO [$sqlUserName];
+        CREATE USER [$escapedBracketName] FROM EXTERNAL PROVIDER;
+    ALTER ROLE db_datareader ADD MEMBER [$escapedBracketName];
+    ALTER ROLE db_datawriter ADD MEMBER [$escapedBracketName];
+    GRANT EXECUTE TO [$escapedBracketName];
     SELECT 'PERMISSION_GRANT_SUCCESS' AS Result;
 END TRY
 BEGIN CATCH
@@ -1566,8 +1549,8 @@ WHERE dp.name = '$escapedUserName';
             $statusResult = Invoke-AzCli -Arguments $statusArgs
             
             if ($statusResult.ExitCode -eq 0) {
-                # Sanitize WARNING text from containerapp extension before parsing JSON
-                $cleanedJson = $statusResult.TrimmedText -replace '(?m)^WARNING:.*$', ''
+                # Remove WARNING lines from containerapp extension before parsing JSON
+                $cleanedJson = ($statusResult.TrimmedText -split "`n" | Where-Object { $_ -notmatch '^WARNING:' }) -join "`n"
                 $cleanedJson = $cleanedJson.Trim()
                 
                 if (-not [string]::IsNullOrWhiteSpace($cleanedJson)) {
@@ -1616,7 +1599,6 @@ WHERE dp.name = '$escapedUserName';
         # Remove WARNING lines from Azure CLI containerapp extension before constructing URL
         $cleanFqdn = ($containerShowResult.TrimmedText -split "`n" | Where-Object { $_ -notmatch '^WARNING:' }) -join ''
         $cleanFqdn = $cleanFqdn.Trim()
-        $containerFqdn = $cleanFqdn
         $containerUrl = "https://$cleanFqdn"
         
         Write-StepStatus "Checking DAB API health endpoint" "Started" "120s"
@@ -1672,64 +1654,10 @@ WHERE dp.name = '$escapedUserName';
         Write-StepStatus "" "Info" $ingressMessage
     }
 
-    # ============================================================================
-    # MCP INSPECTOR DEPLOYMENT (OPTIONAL)
-    # ============================================================================
-    $mcpInspectorUrl = "Not deployed"
-    $dabMcpEndpoint = "https://$containerFqdn/mcp"
-    
-    if (-not $NoMcpInspector) {
-        Write-StepStatus "Deploying MCP Inspector" "Started" "30s"
-        $mcpStartTime = Get-Date
-        
-        # Deploy MCP Inspector container app
-        # The inspector will be accessible via external ingress on ports 6274 (UI) and 6277 (proxy)
-        # Users can connect to the DAB MCP endpoint at: https://$containerFqdn/mcp
-        $mcpArgs = @(
-            'containerapp', 'create',
-            '--name', $mcpInspector,
-            '--resource-group', $rg,
-            '--environment', $acaEnv,
-            '--image', 'ghcr.io/modelcontextprotocol/inspector:latest',
-            '--ingress', 'external',
-            '--target-port', '6274',
-            '--cpu', '0.5',
-            '--memory', '1.0Gi',
-            '--env-vars', "DANGEROUSLY_OMIT_AUTH=true", "HOST=0.0.0.0"
-        )
-        
-        $mcpArgs += '--tags'
-        $mcpArgs += $commonTagValues
-        
-        $mcpCreateResult = Invoke-AzCli -Arguments $mcpArgs
-        
-        if ($mcpCreateResult.ExitCode -eq 0) {
-            $mcpElapsed = [math]::Round(((Get-Date) - $mcpStartTime).TotalSeconds, 1)
-            Write-StepStatus "" "Success" "$mcpInspector created ($($mcpElapsed)`s)"
-            
-            # Get MCP Inspector FQDN
-            $mcpFqdnArgs = @('containerapp', 'show', '--name', $mcpInspector, '--resource-group', $rg, '--query', 'properties.configuration.ingress.fqdn', '--output', 'tsv')
-            $mcpFqdnResult = Invoke-AzCli -Arguments $mcpFqdnArgs
-            
-            if ($mcpFqdnResult.ExitCode -eq 0 -and -not [string]::IsNullOrWhiteSpace($mcpFqdnResult.TrimmedText)) {
-                # Remove WARNING lines from Azure CLI containerapp extension before constructing URL
-                $mcpInspectorFqdn = ($mcpFqdnResult.TrimmedText -split "`n" | Where-Object { $_ -notmatch '^WARNING:' }) -join ''
-                $mcpInspectorFqdn = $mcpInspectorFqdn.Trim()
-                $mcpInspectorUrl = "https://$mcpInspectorFqdn"
-                Write-StepStatus "" "Info" "MCP Inspector URL: $mcpInspectorUrl"
-                Write-StepStatus "" "Info" "Connect to DAB MCP at: $dabMcpEndpoint"
-            } else {
-                Write-StepStatus "" "Info" "MCP Inspector deployed but URL not yet available"
-            }
-        } else {
-            $mcpError = $mcpCreateResult.TrimmedText
-            Write-StepStatus "" "Info" "MCP Inspector deployment skipped (non-critical): $mcpError"
-            Write-Host "  Continuing without MCP Inspector..." -ForegroundColor DarkGray
-        }
-    } else {
-        Write-StepStatus "" "Info" "MCP Inspector deployment skipped (disabled via -NoMcpInspector)"
-    }
 
+    # ============================================================================
+    # SQL COMMANDER DEPLOYMENT (OPTIONAL)
+    # ============================================================================
     # Deploy SQL Commander if enabled
     $sqlCommanderUrl = "Not deployed"
     if (-not $NoSqlCommander) {
@@ -1769,7 +1697,9 @@ WHERE dp.name = '$escapedUserName';
             $sqlCmdPrincipalIdResult = Invoke-AzCli -Arguments $sqlCmdPrincipalIdArgs
             
             if ($sqlCmdPrincipalIdResult.ExitCode -eq 0 -and -not [string]::IsNullOrWhiteSpace($sqlCmdPrincipalIdResult.TrimmedText)) {
-                $sqlCmdPrincipalId = $sqlCmdPrincipalIdResult.TrimmedText -replace 'WARNING:.*', '' -replace '\s+', ''
+                # Remove WARNING lines and strip all whitespace from GUID
+                $sqlCmdPrincipalId = ($sqlCmdPrincipalIdResult.TrimmedText -split "`n" | Where-Object { $_ -notmatch '^WARNING:' }) -join ''
+                $sqlCmdPrincipalId = $sqlCmdPrincipalId -replace '\s+', ''
                 Write-StepStatus "" "Success" "Principal ID: $sqlCmdPrincipalId"
                 
                 # Get SQL Commander managed identity display name
@@ -1788,14 +1718,16 @@ WHERE dp.name = '$escapedUserName';
                 $sqlCmdSqlSuccess = Invoke-RetryOperation `
                     -ScriptBlock {
                         try {
+                            # Escape for both string literals and bracket identifiers in T-SQL
                             $escapedUserName = $sqlCmdSpDisplayName.Replace("'", "''")
+                            $escapedBracketName = $sqlCmdSpDisplayName.Replace("]", "]]")
                             $sqlQuery = @"
 BEGIN TRY
     IF NOT EXISTS (SELECT * FROM sys.database_principals WHERE name = '$escapedUserName')
-        CREATE USER [$sqlCmdSpDisplayName] FROM EXTERNAL PROVIDER;
-    ALTER ROLE db_datareader ADD MEMBER [$sqlCmdSpDisplayName];
-    ALTER ROLE db_datawriter ADD MEMBER [$sqlCmdSpDisplayName];
-    GRANT EXECUTE TO [$sqlCmdSpDisplayName];
+        CREATE USER [$escapedBracketName] FROM EXTERNAL PROVIDER;
+    ALTER ROLE db_datareader ADD MEMBER [$escapedBracketName];
+    ALTER ROLE db_datawriter ADD MEMBER [$escapedBracketName];
+    GRANT EXECUTE TO [$escapedBracketName];
     SELECT 'PERMISSION_GRANT_SUCCESS' AS Result;
 END TRY
 BEGIN CATCH
@@ -1883,8 +1815,8 @@ END CATCH
         -Container $container -ContainerUrl $containerUrl -LogAnalytics $logAnalytics `
         -Environment $acaEnv -CurrentUser $currentUserName -DatabaseType $dbType -TotalTime $totalTimeFormatted `
         -ClientIp $clientIp -SqlServerFqdn $sqlServerFqdn `
-        -FirewallRuleName $firewallRuleName -McpInspector $mcpInspector -McpInspectorUrl $mcpInspectorUrl `
-        -SqlCommander $sqlCommander -SqlCommanderUrl $sqlCommanderUrl -DabMcpEndpoint $dabMcpEndpoint
+        -FirewallRuleName $firewallRuleName -SqlCommander $sqlCommander -SqlCommanderUrl $sqlCommanderUrl
+
 
     $deploymentSummary = @{
         ResourceGroup = $rg
