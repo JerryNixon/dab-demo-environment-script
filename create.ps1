@@ -1167,7 +1167,7 @@ try {
             '--tags') + $commonTagValues
         $fallbackDbResult = Invoke-AzCli -Arguments $fallbackDbArgs
         OK $fallbackDbResult "Failed to create fallback SQL database"
-        $dbType = "Basic DTU (paid)"
+        $dbType = "Basic DTU"
     }
     
     $dbElapsed = [math]::Round(((Get-Date) - $dbStartTime).TotalSeconds, 1)
