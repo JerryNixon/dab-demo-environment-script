@@ -83,7 +83,7 @@ if ($UnknownArgs) {
     exit 1
 }
 
-$ScriptVersion = "0.6.0"  # v0.6.0: Create container with ACR image directly - eliminates placeholder → update → restart cycle
+$ScriptVersion = "0.6.4"  # v0.6.4: Add fail-fast logic for duplicate display name errors (no retry on non-retryable SQL errors)
 $MinimumDabVersion = "1.7.81-rc"  # Minimum required DAB CLI version (note: comparison strips -rc suffix)
 $DockerDabVersion = $MinimumDabVersion   # DAB container image tag to bake into ACR build
 
@@ -143,8 +143,8 @@ function Test-ScriptVersion {
                 Write-Host ""
                 Write-Host "NOTE: A newer version is available!" -ForegroundColor Yellow
                 Write-Host "  Current: $CurrentVersion" -ForegroundColor White
-                Write-Host "  Latest:  $latestVersion" -ForegroundColor Green
-                Write-Host "  Script:  https://github.com/JerryNixon/dab-demo-environment-script/blob/main/create.ps1" -ForegroundColor Cyan
+                Write-Host "  Latest:  $latestVersion" -ForegroundColor White
+                Write-Host "  Repository:  https://github.com/JerryNixon/dab-demo-environment-script" -ForegroundColor White
                 Write-Host ""
             } elseif ($current -gt $latest) {
                 # Local version is NEWER - inform user but continue
@@ -1007,7 +1007,7 @@ try {
     }
     
     if ([string]::IsNullOrWhiteSpace($SqlCommanderName)) {
-        $SqlCommanderName = "sql-commander"
+        $SqlCommanderName = "sql-commander-$runTimestamp"
     }
     
     # Validate and sanitize all resource names according to Azure naming rules
@@ -1461,6 +1461,13 @@ END CATCH
                     return $true
                 }
                 
+                # Check for non-retryable errors that should fail immediately
+                if ($sqlcmdOutput -match 'duplicate display name' -or 
+                    $sqlcmdOutput -match 'Msg 33131') {
+                    Write-StepStatus "" "Error" "Non-retryable error: Duplicate display name in Azure AD"
+                    throw "DAB container managed identity has duplicate display name - cannot proceed"
+                }
+                
                 if ($sqlcmdOutput) {
                     Write-StepStatus "" "Info" "SQL output: $sqlcmdOutput"
                 }
@@ -1469,6 +1476,11 @@ END CATCH
                 }
                 return $false
             } catch {
+                # Check if this is a non-retryable error
+                if ($_.Exception.Message -match 'duplicate display name' -or 
+                    $_.Exception.Message -match 'cannot proceed') {
+                    throw  # Re-throw to stop retries
+                }
                 Write-StepStatus "" "Info" "SQL error: $($_.Exception.Message)"
                 return $false
             }
@@ -1683,7 +1695,7 @@ WHERE dp.name = '$escapedUserName';
             '--target-port', '6274',
             '--cpu', '0.5',
             '--memory', '1.0Gi',
-            '--env-vars', "DANGEROUSLY_OMIT_AUTH=true"
+            '--env-vars', "DANGEROUSLY_OMIT_AUTH=true", "HOST=0.0.0.0"
         )
         
         $mcpArgs += '--tags'
@@ -1727,12 +1739,13 @@ WHERE dp.name = '$escapedUserName';
         # Build connection string for Azure SQL with Azure AD authentication
         $sqlConnectionString = "Server=$sqlServerFqdn;Database=$sqlDb;Authentication=Active Directory Default;Encrypt=True;TrustServerCertificate=False;"
         
-        # Deploy SQL Commander container app with connectivity to Azure SQL
+        # Deploy SQL Commander container app with system-assigned managed identity
         $sqlCmdArgs = @(
             'containerapp', 'create',
             '--name', $sqlCommander,
             '--resource-group', $rg,
             '--environment', $acaEnv,
+            '--system-assigned',
             '--image', 'jerrynixon/sql-commander:latest',
             '--ingress', 'external',
             '--target-port', '8080',
@@ -1749,6 +1762,96 @@ WHERE dp.name = '$escapedUserName';
         if ($sqlCmdCreateResult.ExitCode -eq 0) {
             $sqlCmdElapsed = [math]::Round(((Get-Date) - $sqlCmdStartTime).TotalSeconds, 1)
             Write-StepStatus "" "Success" "$sqlCommander created ($($sqlCmdElapsed)`s)"
+            
+            # Get SQL Commander managed identity principal ID
+            Write-StepStatus "Retrieving SQL Commander managed identity" "Started" "5s"
+            $sqlCmdPrincipalIdArgs = @('containerapp', 'show', '--name', $sqlCommander, '--resource-group', $rg, '--query', 'identity.principalId', '--output', 'tsv')
+            $sqlCmdPrincipalIdResult = Invoke-AzCli -Arguments $sqlCmdPrincipalIdArgs
+            
+            if ($sqlCmdPrincipalIdResult.ExitCode -eq 0 -and -not [string]::IsNullOrWhiteSpace($sqlCmdPrincipalIdResult.TrimmedText)) {
+                $sqlCmdPrincipalId = $sqlCmdPrincipalIdResult.TrimmedText -replace 'WARNING:.*', '' -replace '\s+', ''
+                Write-StepStatus "" "Success" "Principal ID: $sqlCmdPrincipalId"
+                
+                # Get SQL Commander managed identity display name
+                Write-StepStatus "Retrieving SQL Commander MI display name" "Started" "5s"
+                try {
+                    $sqlCmdSpDisplayName = Get-MI-DisplayName -PrincipalId $sqlCmdPrincipalId
+                    Write-StepStatus "" "Success" "Retrieved: $sqlCmdSpDisplayName"
+                } catch {
+                    throw "Failed to retrieve SQL Commander managed identity display name: $($_.Exception.Message)"
+                }
+                
+                # Grant SQL Commander managed identity access to SQL Database
+                Write-StepStatus "Granting SQL Commander MI access to SQL Database" "Started" "10s"
+                $sqlCmdSqlStartTime = Get-Date
+                
+                $sqlCmdSqlSuccess = Invoke-RetryOperation `
+                    -ScriptBlock {
+                        try {
+                            $escapedUserName = $sqlCmdSpDisplayName.Replace("'", "''")
+                            $sqlQuery = @"
+BEGIN TRY
+    IF NOT EXISTS (SELECT * FROM sys.database_principals WHERE name = '$escapedUserName')
+        CREATE USER [$sqlCmdSpDisplayName] FROM EXTERNAL PROVIDER;
+    ALTER ROLE db_datareader ADD MEMBER [$sqlCmdSpDisplayName];
+    ALTER ROLE db_datawriter ADD MEMBER [$sqlCmdSpDisplayName];
+    GRANT EXECUTE TO [$sqlCmdSpDisplayName];
+    SELECT 'PERMISSION_GRANT_SUCCESS' AS Result;
+END TRY
+BEGIN CATCH
+    DECLARE @ErrorMessage NVARCHAR(4000) = ERROR_MESSAGE();
+    PRINT 'ERROR: Failed to grant permissions: ' + @ErrorMessage;
+    THROW;
+END CATCH
+"@
+                            $sqlcmdOutput = sqlcmd -S $sqlServerFqdn -d $sqlDb -G -Q $sqlQuery 2>&1 | Out-String
+                            $sqlExit = $LASTEXITCODE
+                            
+                            if ($sqlExit -eq 0 -and $sqlcmdOutput -match 'PERMISSION_GRANT_SUCCESS') {
+                                return $true
+                            }
+                            
+                            # Check for non-retryable errors that should fail immediately
+                            if ($sqlcmdOutput -match 'duplicate display name' -or 
+                                $sqlcmdOutput -match 'Msg 33131') {
+                                Write-StepStatus "" "Error" "Non-retryable error: Duplicate display name in Azure AD"
+                                throw "SQL Commander managed identity has duplicate display name - cannot proceed"
+                            }
+                            
+                            if ($sqlcmdOutput) {
+                                Write-StepStatus "" "Info" "SQL output: $sqlcmdOutput"
+                            }
+                            return $false
+                        } catch {
+                            # Check if this is a non-retryable error
+                            if ($_.Exception.Message -match 'duplicate display name' -or 
+                                $_.Exception.Message -match 'cannot proceed') {
+                                throw  # Re-throw to stop retries
+                            }
+                            Write-StepStatus "" "Info" "SQL error: $($_.Exception.Message)"
+                            return $false
+                        }
+                    } `
+                    -MaxRetries 12 `
+                    -BaseDelaySeconds 20 `
+                    -UseExponentialBackoff `
+                    -UseJitter `
+                    -MaxDelaySeconds 240 `
+                    -RetryMessage "attempt {attempt}/{max}, waiting {delay}s" `
+                    -OperationName "SQL Commander MI access grant"
+                
+                if (-not $sqlCmdSqlSuccess) {
+                    $sqlCmdSqlElapsed = [math]::Round(((Get-Date) - $sqlCmdSqlStartTime).TotalSeconds, 0)
+                    Write-StepStatus "" "Warning" "Failed to grant SQL access after 12 attempts ($($sqlCmdSqlElapsed)s)"
+                    Write-Host "  SQL Commander may not be able to connect to the database" -ForegroundColor Yellow
+                } else {
+                    $sqlCmdSqlElapsed = [math]::Round(((Get-Date) - $sqlCmdSqlStartTime).TotalSeconds, 0)
+                    Write-StepStatus "" "Success" "$sqlCmdSpDisplayName granted access to $sqlDb ($($sqlCmdSqlElapsed)`s)"
+                }
+            } else {
+                Write-StepStatus "" "Warning" "Could not retrieve SQL Commander managed identity"
+                Write-Host "  SQL Commander may not be able to connect to the database" -ForegroundColor Yellow
+            }
             
             # Get SQL Commander FQDN
             $sqlCmdFqdnArgs = @('containerapp', 'show', '--name', $sqlCommander, '--resource-group', $rg, '--query', 'properties.configuration.ingress.fqdn', '--output', 'tsv')
