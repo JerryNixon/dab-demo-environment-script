@@ -12,7 +12,9 @@
 #   -LogAnalyticsName: Custom name for Log Analytics workspace (default: log-workspace)
 #   -ContainerEnvironmentName: Custom name for Container App Environment (default: aca-environment)
 #   -McpInspectorName: Custom name for MCP Inspector container (default: mcp-inspector)
+#   -SqlCommanderName: Custom name for SQL Commander container (default: sql-commander)
 #   -NoMcpInspector: Skip MCP Inspector deployment (default: deploy MCP Inspector)
+#   -NoSqlCommander: Skip SQL Commander deployment (default: deploy SQL Commander)
 #   -NoCleanup: Preserve resource group on failure for debugging (default: auto-cleanup)
 #
 # Notes:
@@ -20,7 +22,8 @@
 #   The Dockerfile must be present in the current directory.
 #   To update an existing deployment, use update.ps1 instead.
 #   Resource names are automatically validated and sanitized according to Azure naming rules.
-#   MCP Inspector is deployed by default in the same ACA environment with internal DNS connectivity to DAB.
+#   MCP Inspector is deployed by default to test the DAB MCP endpoint at /mcp.
+#   SQL Commander is deployed by default with Azure AD authentication to Azure SQL Database.
 #
 # Examples:
 #   .\create.ps1
@@ -29,7 +32,8 @@
 #   .\create.ps1 -ResourceGroupName "my-dab-rg" -SqlServerName "my-sql-server"  # Custom names
 #   .\create.ps1 -ContainerAppName "my-api" -AcrName "myregistry123"  # Mix custom and default names
 #   .\create.ps1 -NoMcpInspector  # Skip MCP Inspector deployment
-#   .\create.ps1 -McpInspectorName "my-inspector"  # Custom inspector name
+#   .\create.ps1 -NoSqlCommander  # Skip SQL Commander deployment
+#   .\create.ps1 -McpInspectorName "my-inspector" -SqlCommanderName "my-sql-cmd"  # Custom names
 #   .\create.ps1 -NoCleanup  # Keep resources on failure for debugging
 #
 param(
@@ -55,7 +59,11 @@ param(
     
     [string]$McpInspectorName = "",
     
+    [string]$SqlCommanderName = "",
+    
     [switch]$NoMcpInspector,
+    
+    [switch]$NoSqlCommander,
     
     [switch]$NoCleanup,
     
@@ -75,7 +83,7 @@ if ($UnknownArgs) {
     exit 1
 }
 
-$ScriptVersion = "0.5.0"
+$ScriptVersion = "0.6.0"  # v0.6.0: Create container with ACR image directly - eliminates placeholder → update → restart cycle
 $MinimumDabVersion = "1.7.81-rc"  # Minimum required DAB CLI version (note: comparison strips -rc suffix)
 $DockerDabVersion = $MinimumDabVersion   # DAB container image tag to bake into ACR build
 
@@ -659,7 +667,7 @@ function Write-DeploymentSummary {
     param(
         $ResourceGroup, $Region, $SqlServer, $SqlDatabase, $Container, $ContainerUrl,
         $LogAnalytics, $Environment, $CurrentUser, $DatabaseType, $TotalTime, $ClientIp, $SqlServerFqdn, $FirewallRuleName,
-        $McpInspector, $McpInspectorUrl
+        $McpInspector, $McpInspectorUrl, $SqlCommander, $SqlCommanderUrl, $DabMcpEndpoint
     )
     
     $subscriptionIdResult = Invoke-AzCli -Arguments @('account', 'show', '--query', 'id', '--output', 'tsv')
@@ -681,14 +689,23 @@ function Write-DeploymentSummary {
         Write-Host "  MCP Inspector:     $McpInspector"
     }
     
+    if ($SqlCommander -and $SqlCommanderUrl -ne "Not deployed") {
+        Write-Host "  SQL Commander:     $SqlCommander"
+    }
+    
     Write-Host "`nQUICK LINKS" -ForegroundColor Cyan
     Write-Host "  Portal:            https://ms.portal.azure.com/#@microsoft.onmicrosoft.com/resource/subscriptions/$subscriptionId/resourceGroups/$ResourceGroup/overview"
     Write-Host "  Swagger:           $ContainerUrl/swagger"
     Write-Host "  GraphQL:           $ContainerUrl/graphql"
     Write-Host "  Health:            $ContainerUrl/health"
+    Write-Host "  MCP Endpoint:      $DabMcpEndpoint"
     
     if ($McpInspector -and $McpInspectorUrl -ne "Not deployed") {
         Write-Host "  MCP Inspector:     $McpInspectorUrl"
+    }
+    
+    if ($SqlCommander -and $SqlCommanderUrl -ne "Not deployed") {
+        Write-Host "  SQL Commander:     $SqlCommanderUrl"
     }
     
     Write-Host "`n================================================================================" -ForegroundColor Green
@@ -989,6 +1006,10 @@ try {
         $McpInspectorName = "mcp-inspector"
     }
     
+    if ([string]::IsNullOrWhiteSpace($SqlCommanderName)) {
+        $SqlCommanderName = "sql-commander"
+    }
+    
     # Validate and sanitize all resource names according to Azure naming rules
     $rg = Assert-AzureResourceName -Name $ResourceGroupName -ResourceType 'ResourceGroup'
     $sqlServer = Assert-AzureResourceName -Name $SqlServerName -ResourceType 'SqlServer'
@@ -998,6 +1019,7 @@ try {
     $logAnalytics = Assert-AzureResourceName -Name $LogAnalyticsName -ResourceType 'LogAnalytics'
     $acaEnv = Assert-AzureResourceName -Name $ContainerEnvironmentName -ResourceType 'ContainerEnvironment'
     $mcpInspector = Assert-AzureResourceName -Name $McpInspectorName -ResourceType 'ContainerApp'
+    $sqlCommander = Assert-AzureResourceName -Name $SqlCommanderName -ResourceType 'ContainerApp'
 
     Write-StepStatus "Creating resource group" "Started" "5s"
     $rgStartTime = Get-Date
@@ -1333,12 +1355,12 @@ try {
     
     $ContainerImage = $imageTag
 
-    Write-StepStatus "Creating Container App with managed identity" "Started" "30s"
+    Write-StepStatus "Creating Container App with ACR image" "Started" "60s"
     
     $connectionString = "Server=tcp:${sqlServerFqdn},1433;Database=${sqlDb};Authentication=Active Directory Managed Identity;"
     
-    # Create container app with a public placeholder image to establish the managed identity
-    # We'll update it with the ACR image after assigning AcrPull role
+    # Create container app with the correct ACR image from the start
+    # No placeholder image, no update needed, no revision churn
     $createAppStartTime = Get-Date
     $createAppArgs = @(
         'containerapp', 'create',
@@ -1348,7 +1370,9 @@ try {
         '--system-assigned',
         '--ingress', 'external',
         '--target-port', '5000',
-        '--image', 'mcr.microsoft.com/azuredocs/containerapps-helloworld:latest',
+        '--image', $ContainerImage,
+        '--registry-server', $acrLoginServer,
+        '--registry-identity', 'system',
         '--cpu', $Config.ContainerCpu,
         '--memory', $Config.ContainerMemory,
         '--env-vars',
@@ -1360,7 +1384,7 @@ try {
     $createAppResult = Invoke-AzCli -Arguments $createAppArgs
     OK $createAppResult "Failed to create Container App"
     $createAppElapsed = [math]::Round(((Get-Date) - $createAppStartTime).TotalSeconds, 1)
-    Write-StepStatus "" "Success" "$container created with placeholder image ($($createAppElapsed)`s)"
+    Write-StepStatus "" "Success" "$container created with $ContainerImage ($($createAppElapsed)`s)"
     
     Write-StepStatus "Assigning AcrPull role to managed identity" "Started" "15s"
     
@@ -1388,43 +1412,6 @@ try {
     OK $roleAssignResult "Failed to assign AcrPull role"
     Write-StepStatus "" "Success" "AcrPull role assigned to $container MI"
 
-    Write-StepStatus "Waiting for RBAC propagation" "Started" "10s"
-    Start-Sleep -Seconds 10
-    Write-StepStatus "" "Success" "RBAC propagation complete"
-
-    Write-StepStatus "Configuring Container App registry for ACR" "Started" "20s"
-    
-    $registrySetArgs = @(
-        'containerapp', 'registry', 'set',
-        '--name', $container,
-        '--resource-group', $rg,
-        '--server', $acrLoginServer,
-        '--identity', 'system'
-    )
-    
-    $registrySetResult = Invoke-AzCli -Arguments $registrySetArgs
-    OK $registrySetResult "Failed to configure ACR with managed identity"
-    Write-StepStatus "" "Success" "Registry configured for $acrLoginServer using system-assigned identity"
-
-    Write-StepStatus "Updating Container App with ACR image" "Started" "40s"
-    
-    # Now update the container app to use the real ACR image - registry credentials are already configured
-    $updateAppStartTime = Get-Date
-    $updateAppArgs = @(
-        'containerapp', 'update',
-        '--name', $container,
-        '--resource-group', $rg,
-        '--image', $ContainerImage,
-        '--set-env-vars',
-        "MSSQL_CONNECTION_STRING=$connectionString",
-        "Runtime__ConfigFile=/App/dab-config.json"
-    )
-    
-    $updateAppResult = Invoke-AzCli -Arguments $updateAppArgs
-    OK $updateAppResult "Failed to update Container App with ACR image"
-    
-    $updateAppElapsed = [math]::Round(((Get-Date) - $updateAppStartTime).TotalSeconds, 1)
-    Write-StepStatus "" "Success" "Container App updated with $ContainerImage ($($updateAppElapsed)`s)"
 
     Write-StepStatus "Retrieving managed identity display name" "Started" "5s"
     
@@ -1558,26 +1545,6 @@ WHERE dp.name = '$escapedUserName';
         Write-StepStatus "" "Info" "Permission verification skipped: $($_.Exception.Message)"
     }
     
-    $restartStartTime = Get-Date
-    Write-StepStatus "Restarting container to activate managed identity" "Started" "5s"
-    
-    $revisionNameArgs = @('containerapp', 'revision', 'list', '--name', $container, '--resource-group', $rg, '--query', '[0].name', '--output', 'tsv')
-    $revisionNameResult = Invoke-AzCli -Arguments $revisionNameArgs
-    OK $revisionNameResult "Failed to retrieve revision name"
-    $revisionName = $revisionNameResult.TrimmedText
-    
-    $restartArgs = @('containerapp', 'revision', 'restart', '--name', $container, '--resource-group', $rg, '--revision', $revisionName)
-    $restartResult = Invoke-AzCli -Arguments $restartArgs
-    
-    if ($restartResult.ExitCode -eq 0) {
-        $restartElapsed = [math]::Round(((Get-Date) - $restartStartTime).TotalSeconds, 0)
-    Write-StepStatus "" "Success" "$container restarted ($($restartElapsed)`s)"
-    } else {
-        $restartElapsed = [math]::Round(((Get-Date) - $restartStartTime).TotalSeconds, 0)
-        Write-StepStatus "" "Error" "Container failed to restart (${restartElapsed}s, exit code: $($restartResult.ExitCode))"
-        throw "Failed to restart container: $($restartResult.Text)"
-    }
-    
     Write-StepStatus "Verifying container is running" "Started" "300s"
     $verifyStartTime = Get-Date
     
@@ -1637,6 +1604,7 @@ WHERE dp.name = '$escapedUserName';
         # Remove WARNING lines from Azure CLI containerapp extension before constructing URL
         $cleanFqdn = ($containerShowResult.TrimmedText -split "`n" | Where-Object { $_ -notmatch '^WARNING:' }) -join ''
         $cleanFqdn = $cleanFqdn.Trim()
+        $containerFqdn = $cleanFqdn
         $containerUrl = "https://$cleanFqdn"
         
         Write-StepStatus "Checking DAB API health endpoint" "Started" "120s"
@@ -1696,26 +1664,26 @@ WHERE dp.name = '$escapedUserName';
     # MCP INSPECTOR DEPLOYMENT (OPTIONAL)
     # ============================================================================
     $mcpInspectorUrl = "Not deployed"
+    $dabMcpEndpoint = "https://$containerFqdn/mcp"
     
     if (-not $NoMcpInspector) {
         Write-StepStatus "Deploying MCP Inspector" "Started" "30s"
         $mcpStartTime = Get-Date
         
-        # Build internal DNS name for DAB MCP endpoint (container-name.internal:port/mcp)
-        $dabMcpUrl = "http://$container.internal:5000/mcp"
-        
-        # Deploy MCP Inspector container app with connectivity to DAB MCP endpoint
+        # Deploy MCP Inspector container app
+        # The inspector will be accessible via external ingress on ports 6274 (UI) and 6277 (proxy)
+        # Users can connect to the DAB MCP endpoint at: https://$containerFqdn/mcp
         $mcpArgs = @(
             'containerapp', 'create',
             '--name', $mcpInspector,
             '--resource-group', $rg,
             '--environment', $acaEnv,
-            '--image', 'ghcr.io/anthropic/mcp-inspector:latest',
+            '--image', 'ghcr.io/modelcontextprotocol/inspector:latest',
             '--ingress', 'external',
-            '--target-port', '3000',
+            '--target-port', '6274',
             '--cpu', '0.5',
             '--memory', '1.0Gi',
-            '--env-vars', "MCP_SERVER_URL=$dabMcpUrl"
+            '--env-vars', "DANGEROUSLY_OMIT_AUTH=true"
         )
         
         $mcpArgs += '--tags'
@@ -1732,10 +1700,12 @@ WHERE dp.name = '$escapedUserName';
             $mcpFqdnResult = Invoke-AzCli -Arguments $mcpFqdnArgs
             
             if ($mcpFqdnResult.ExitCode -eq 0 -and -not [string]::IsNullOrWhiteSpace($mcpFqdnResult.TrimmedText)) {
-                $mcpInspectorFqdn = $mcpFqdnResult.TrimmedText
+                # Remove WARNING lines from Azure CLI containerapp extension before constructing URL
+                $mcpInspectorFqdn = ($mcpFqdnResult.TrimmedText -split "`n" | Where-Object { $_ -notmatch '^WARNING:' }) -join ''
+                $mcpInspectorFqdn = $mcpInspectorFqdn.Trim()
                 $mcpInspectorUrl = "https://$mcpInspectorFqdn"
                 Write-StepStatus "" "Info" "MCP Inspector URL: $mcpInspectorUrl"
-                Write-StepStatus "" "Info" "Inspector connected to DAB MCP at: $dabMcpUrl"
+                Write-StepStatus "" "Info" "Connect to DAB MCP at: $dabMcpEndpoint"
             } else {
                 Write-StepStatus "" "Info" "MCP Inspector deployed but URL not yet available"
             }
@@ -1748,6 +1718,61 @@ WHERE dp.name = '$escapedUserName';
         Write-StepStatus "" "Info" "MCP Inspector deployment skipped (disabled via -NoMcpInspector)"
     }
 
+    # Deploy SQL Commander if enabled
+    $sqlCommanderUrl = "Not deployed"
+    if (-not $NoSqlCommander) {
+        Write-StepStatus "Deploying SQL Commander" "Started" "30s"
+        $sqlCmdStartTime = Get-Date
+        
+        # Build connection string for Azure SQL with Azure AD authentication
+        $sqlConnectionString = "Server=$sqlServerFqdn;Database=$sqlDb;Authentication=Active Directory Default;Encrypt=True;TrustServerCertificate=False;"
+        
+        # Deploy SQL Commander container app with connectivity to Azure SQL
+        $sqlCmdArgs = @(
+            'containerapp', 'create',
+            '--name', $sqlCommander,
+            '--resource-group', $rg,
+            '--environment', $acaEnv,
+            '--image', 'jerrynixon/sql-commander:latest',
+            '--ingress', 'external',
+            '--target-port', '8080',
+            '--cpu', '0.5',
+            '--memory', '1.0Gi',
+            '--env-vars', "ConnectionStrings__db=$sqlConnectionString"
+        )
+        
+        $sqlCmdArgs += '--tags'
+        $sqlCmdArgs += $commonTagValues
+        
+        $sqlCmdCreateResult = Invoke-AzCli -Arguments $sqlCmdArgs
+        
+        if ($sqlCmdCreateResult.ExitCode -eq 0) {
+            $sqlCmdElapsed = [math]::Round(((Get-Date) - $sqlCmdStartTime).TotalSeconds, 1)
+            Write-StepStatus "" "Success" "$sqlCommander created ($($sqlCmdElapsed)`s)"
+            
+            # Get SQL Commander FQDN
+            $sqlCmdFqdnArgs = @('containerapp', 'show', '--name', $sqlCommander, '--resource-group', $rg, '--query', 'properties.configuration.ingress.fqdn', '--output', 'tsv')
+            $sqlCmdFqdnResult = Invoke-AzCli -Arguments $sqlCmdFqdnArgs
+            
+            if ($sqlCmdFqdnResult.ExitCode -eq 0 -and -not [string]::IsNullOrWhiteSpace($sqlCmdFqdnResult.TrimmedText)) {
+                # Remove WARNING lines from Azure CLI containerapp extension before constructing URL
+                $sqlCommanderFqdn = ($sqlCmdFqdnResult.TrimmedText -split "`n" | Where-Object { $_ -notmatch '^WARNING:' }) -join ''
+                $sqlCommanderFqdn = $sqlCommanderFqdn.Trim()
+                $sqlCommanderUrl = "https://$sqlCommanderFqdn"
+                Write-StepStatus "" "Info" "SQL Commander URL: $sqlCommanderUrl"
+                Write-StepStatus "" "Info" "Connected to Azure SQL: $sqlServerFqdn/$sqlDb"
+            } else {
+                Write-StepStatus "" "Info" "SQL Commander deployed but URL not yet available"
+            }
+        } else {
+            $sqlCmdError = $sqlCmdCreateResult.TrimmedText
+            Write-StepStatus "" "Info" "SQL Commander deployment skipped (non-critical): $sqlCmdError"
+            Write-Host "  Continuing without SQL Commander..." -ForegroundColor DarkGray
+        }
+    } else {
+        Write-StepStatus "" "Info" "SQL Commander deployment skipped (disabled via -NoSqlCommander)"
+    }
+
     $totalTime = [math]::Round(((Get-Date) - $startTime).TotalMinutes, 1)
     $totalTimeFormatted = "${totalTime}m"
 
@@ -1755,7 +1780,8 @@ WHERE dp.name = '$escapedUserName';
         -Container $container -ContainerUrl $containerUrl -LogAnalytics $logAnalytics `
         -Environment $acaEnv -CurrentUser $currentUserName -DatabaseType $dbType -TotalTime $totalTimeFormatted `
         -ClientIp $clientIp -SqlServerFqdn $sqlServerFqdn `
-        -FirewallRuleName $firewallRuleName -McpInspector $mcpInspector -McpInspectorUrl $mcpInspectorUrl
+        -FirewallRuleName $firewallRuleName -McpInspector $mcpInspector -McpInspectorUrl $mcpInspectorUrl `
+        -SqlCommander $sqlCommander -SqlCommanderUrl $sqlCommanderUrl -DabMcpEndpoint $dabMcpEndpoint
 
     $deploymentSummary = @{
         ResourceGroup = $rg

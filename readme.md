@@ -27,7 +27,8 @@ Resource Group: dab-demo-<timestamp>
  ├─ Azure Log Analytics Workspace
  ├─ Azure Container Apps Environment
  │   ├─ Container App (runs Data API builder)
- │   └─ MCP Inspector (testing/debugging UI) 
+ │   ├─ MCP Inspector (testing/debugging UI)
+ │   └─ SQL Commander (database management UI)
  ```
 
  ### Tags used
@@ -44,8 +45,9 @@ Resource Group: dab-demo-<timestamp>
   -Region eastus `                                    # Customize the region (default: westus2)
   -DatabasePath ".\databases\database.sql" `          # Customize the database file (default: ./database.sql)
   -ConfigPath ".\configs\dab-config.json" `           # Customize the DAB configuration file (default: ./dab-config.json)
-  -NoCleanup                                          # Don't roll back if there is a failure
-  -NoMcpInspector                                     # Don't deploy MCP inspector automatically
+  -NoCleanup `                                        # Don't roll back if there is a failure
+  -NoMcpInspector `                                   # Don't deploy MCP Inspector automatically
+  -NoSqlCommander                                     # Don't deploy SQL Commander automatically
 
 # Customize individual resource names (new in v0.4.0)
 ./create.ps1 `
@@ -55,23 +57,32 @@ Resource Group: dab-demo-<timestamp>
   -ContainerAppName "my-api" `                        # Custom Container App name (will be lowercase)
   -AcrName "myregistry123" `                          # Custom ACR name (alphanumeric only, lowercase)
   -LogAnalyticsName "my-logs" `                       # Custom Log Analytics workspace name
-  -ContainerEnvironmentName "my-aca-env"              # Custom Container App Environment name
-  -McpInspectorName "my-inspector"                    # Custom MCP Inspector name
+  -ContainerEnvironmentName "my-aca-env" `            # Custom Container App Environment name
+  -McpInspectorName "my-inspector" `                  # Custom MCP Inspector name
+  -SqlCommanderName "my-sql-cmd"                      # Custom SQL Commander name
 ```
 
 ### MCP Inspector
 
-By default, the script deploys an [MCP Inspector](https://github.com/anthropic/mcp-inspector) container alongside your DAB API. This provides:
+By default, the script deploys an [MCP Inspector](https://modelcontextprotocol.io/docs/tools/inspector) container alongside your DAB API. This provides:
 
 - **Web UI** for testing and debugging your DAB MCP endpoint
 - **Network connectivity** via internal DNS to DAB's MCP endpoint at `http://<container-name>.internal:5000/mcp`
-- **No additional configuration** required - automatically connects to DAB
-- **External ingress** enabled for easy browser access
+- **No authentication** required (`DANGEROUSLY_OMIT_AUTH=true` for testing/development)
+- **External ingress** enabled for easy browser access on port 6274
 
-The MCP Inspector runs in the same Azure Container Apps Environment as your DAB container, giving it private network access through the built-in internal DNS resolution. The inspector is configured with `MCP_SERVER_URL` pointing to the DAB MCP endpoint. You can disable it with `-NoMcpInspector` if not needed.
-- **External ingress** enabled for easy browser access
+The MCP Inspector runs in the same Azure Container Apps Environment as your DAB container, giving it private network access through the built-in internal DNS resolution. It uses `ghcr.io/modelcontextprotocol/inspector:latest`. You can disable it with `-NoMcpInspector` or customize the name with `-McpInspectorName "custom-name"`.
 
-The MCP Inspector runs in the same Azure Container Apps Environment as your DAB container, giving it private network access through the built-in internal DNS resolution. The inspector is configured with `MCP_SERVER_URL` pointing to the DAB MCP endpoint. You can disable it with `-IncludeMcpInspector:$false` if not needed.
+### SQL Commander
+
+By default, the script deploys a [SQL Commander](https://github.com/jerrynixon/sql-commander) container that provides a web-based UI for managing your Azure SQL database. This provides:
+
+- **Web-based SQL query interface** for running queries and viewing results
+- **Azure AD authentication** connects using Azure Default credentials (same as the deployment)
+- **Connection string** configured via `ConnectionStrings__db` environment variable
+- **External ingress** enabled for easy browser access on port 8080
+
+The SQL Commander container uses `jerrynixon/sql-commander:latest` and connects to your Azure SQL database using the same authentication as the PowerShell script. You can disable it with `-NoSqlCommander` or customize the name with `-SqlCommanderName "custom-name"`.
 
 ### Resource naming rules
 
@@ -307,11 +318,24 @@ az containerapp create \
   --name "$mcpInspector" \
   --resource-group "$rg" \
   --environment "$acaEnv" \
-  --image ghcr.io/anthropic/mcp-inspector:latest \
+  --image ghcr.io/modelcontextprotocol/inspector:latest \
   --ingress external \
-  --target-port 3000 \
+  --target-port 6274 \
   --cpu 0.5 \
   --memory 1.0Gi \
-  --env-vars MCP_SERVER_URL="http://$container.internal:5000/mcp" \
+  --env-vars DANGEROUSLY_OMIT_AUTH=true \
+  --tags author=dab-demo version=0.5.0 owner="$owner"
+
+# Optional: Deploy SQL Commander (enabled by default)
+az containerapp create \
+  --name "$sqlCommander" \
+  --resource-group "$rg" \
+  --environment "$acaEnv" \
+  --image jerrynixon/sql-commander:latest \
+  --ingress external \
+  --target-port 8080 \
+  --cpu 0.5 \
+  --memory 1.0Gi \
+  --env-vars ConnectionStrings__db="Server=$sqlServer.database.windows.net;Database=$sqlDatabase;Authentication=Active Directory Default;" \
   --tags author=dab-demo version=0.5.0 owner="$owner"
 ```
