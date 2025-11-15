@@ -26,11 +26,11 @@
 #   .\create.ps1
 #   .\create.ps1 -Region eastus
 #   .\create.ps1 -Region westeurope -DatabasePath ".\databases\prod.sql" -ConfigPath ".\configs\prod.json"
-#   .\create.ps1 -ResourceGroupName "my-dab-rg" -SqlServerName "my-sql-server"  # Custom names
-#   .\create.ps1 -ContainerAppName "my-api" -AcrName "myregistry123"  # Mix custom and default names
-#   .\create.ps1 -NoSqlCommander  # Skip SQL Commander deployment
-#   .\create.ps1 -SqlCommanderName "my-sql-cmd"  # Custom SQL Commander name
-#   .\create.ps1 -NoCleanup  # Keep resources on failure for debugging
+#   .\create.ps1 -ResourceGroupName "my-dab-rg" -SqlServerName "my-sql-server"
+#   .\create.ps1 -ContainerAppName "my-api" -AcrName "myregistry123"
+#   .\create.ps1 -NoSqlCommander
+#   .\create.ps1 -SqlCommanderName "my-sql-cmd"
+#   .\create.ps1 -NoCleanup
 #
 param(
     [string]$Region = "westus2",
@@ -63,7 +63,6 @@ param(
     [string[]]$UnknownArgs
 )
 
-# Validate no unknown/typo parameters were passed
 if ($UnknownArgs) {
     Write-Host "`n================================================================================" -ForegroundColor Red
     Write-Host "ERROR: Unknown or misspelled parameter(s) detected" -ForegroundColor Red -BackgroundColor Black
@@ -75,13 +74,12 @@ if ($UnknownArgs) {
     exit 1
 }
 
-$ScriptVersion = "0.7.0"  # v0.7.0: Removed MCP Inspector deployment (not working reliably)
-$MinimumDabVersion = "1.7.81-rc"  # Minimum required DAB CLI version (note: comparison strips -rc suffix)
-$DockerDabVersion = $MinimumDabVersion   # DAB container image tag to bake into ACR build
+$ScriptVersion = "0.7.0"
+$MinimumDabVersion = "1.7.81-rc"
+$DockerDabVersion = $MinimumDabVersion
 
 Set-StrictMode -Version Latest
 
-# Verify PowerShell version (support 5.1 and 7+)
 if ($PSVersionTable.PSVersion.Major -lt 5 -or ($PSVersionTable.PSVersion.Major -eq 5 -and $PSVersionTable.PSVersion.Minor -lt 1)) {
     Write-Host "ERROR: PowerShell 5.1 or higher is required" -ForegroundColor Red
     Write-Host "Current version: $($PSVersionTable.PSVersion)" -ForegroundColor Yellow
@@ -109,7 +107,6 @@ $script:CliLog = Join-Path $PSScriptRoot "$runTimestamp.log"
 
 "[$(Get-Date -Format o)] CLI command log - version $ScriptVersion" | Out-File $script:CliLog
 
-# Helper functions (must be defined before use)
 function OK { param($r, $msg) if($r.ExitCode -ne 0) { throw "$msg`n$($r.Text)" } }
 
 function Test-ScriptVersion {
@@ -119,19 +116,15 @@ function Test-ScriptVersion {
     )
     
     try {
-        # Fetch the version directly from the script on GitHub
         $scriptContent = Invoke-RestMethod -Uri "https://raw.githubusercontent.com/JerryNixon/dab-demo-environment-script/refs/heads/main/create.ps1" -TimeoutSec 5 -ErrorAction Stop
         
-        # Extract version from the script (look for $ScriptVersion = "x.y.z")
         if ($scriptContent -match '\$ScriptVersion\s*=\s*"([0-9]+\.[0-9]+\.[0-9]+)"') {
             $latestVersion = $matches[1]
             
-            # Parse versions for comparison
             $current = [version]$CurrentVersion
             $latest = [version]$latestVersion
             
             if ($current -lt $latest) {
-                # Local version is OLDER - show info but continue
                 Write-Host ""
                 Write-Host "NOTE: A newer version is available!" -ForegroundColor Yellow
                 Write-Host "  Current: $CurrentVersion" -ForegroundColor White
@@ -139,19 +132,14 @@ function Test-ScriptVersion {
                 Write-Host "  Repository:  https://github.com/JerryNixon/dab-demo-environment-script" -ForegroundColor White
                 Write-Host ""
             } elseif ($current -gt $latest) {
-                # Local version is NEWER - inform user but continue
                 Write-Host "INFO: Your script version ($CurrentVersion) is newer than the GitHub version ($latestVersion)" -ForegroundColor Yellow
                 Write-Host "  Proceeding with execution. Ensure this is the intended build." -ForegroundColor White
                 Write-Host ""
             }
-            # If equal, silently continue (versions match)
         }
     } catch [System.Management.Automation.RuntimeException] {
-        # Re-throw our intentional version mismatch error
         throw
     } catch {
-        # Silent fail for network issues - don't block deployment if GitHub is unreachable
-        # (Silently continue - no output needed)
     }
 }
 
@@ -198,7 +186,6 @@ if (-not (Get-Command dab -ErrorAction SilentlyContinue)) {
             $patchVersion = [int]$Matches[3]
             $dabVersion = "$majorVersion.$minorVersion.$patchVersion"
             
-            # Check minimum version (strip -rc suffix for comparison)
             $minRequiredBase = $MinimumDabVersion -replace '-rc$', ''
             $minRequired = [version]$minRequiredBase
             $isOldVersion = ([version]$dabVersion) -lt $minRequired
@@ -245,7 +232,6 @@ if (-not (Get-Command sqlcmd -ErrorAction SilentlyContinue)) {
 } else {
     Write-Host "  sqlcmd: " -NoNewline -ForegroundColor Yellow
     try {
-        # Try modern sqlcmd first (go-sqlcmd)
         $sqlcmdVersionOutput = & sqlcmd --version 2>&1 | Out-String
         if ($sqlcmdVersionOutput -match 'v?(\d+)\.(\d+)\.(\d+)') {
             $majorVersion = [int]$Matches[1]
@@ -254,14 +240,12 @@ if (-not (Get-Command sqlcmd -ErrorAction SilentlyContinue)) {
             $sqlcmdVersion = "$majorVersion.$minorVersion.$patchVersion"
             Write-Host "Installed ($sqlcmdVersion)" -ForegroundColor Green
         } else {
-            # Fall back to legacy sqlcmd check
             $sqlcmdVersionOutput = & sqlcmd -? 2>&1 | Out-String
             if ($sqlcmdVersionOutput -match 'Version\s+(\d+)\.(\d+)\.(\d+)\.(\d+)') {
                 $majorVersion = [int]$Matches[1]
                 $minorVersion = [int]$Matches[2]
                 $sqlcmdVersion = "$majorVersion.$minorVersion.$($Matches[3]).$($Matches[4])"
                 
-                # Check if legacy version supports Azure AD authentication (-G flag)
                 if ($majorVersion -lt 13 -or ($majorVersion -eq 13 -and $minorVersion -lt 1)) {
                     Write-Host "Installed ($sqlcmdVersion) - TOO OLD" -ForegroundColor Red
                     Write-Host ""
@@ -285,7 +269,6 @@ if (-not (Get-Command sqlcmd -ErrorAction SilentlyContinue)) {
     }
 }
 
-# Database validation
 if (-not (Test-Path $DatabasePath)) {
     Write-Host "  database.sql: " -NoNewline -ForegroundColor Yellow
     Write-Host "Not found" -ForegroundColor Red
@@ -308,7 +291,6 @@ if ([string]::IsNullOrWhiteSpace($databaseContent)) {
 Write-Host "  database.sql: " -NoNewline -ForegroundColor Yellow
 Write-Host "Found" -ForegroundColor Green
 
-# DAB config validation
 if (-not (Test-Path $ConfigPath)) {
     Write-Host "  dab-config.json: " -NoNewline -ForegroundColor Yellow
     Write-Host "Not found" -ForegroundColor Red
@@ -373,7 +355,6 @@ Write-Host $runTimestamp -ForegroundColor Green
 
 Write-Host ""
 
-# Check for script updates
 Test-ScriptVersion -CurrentVersion $ScriptVersion
 
 Write-Host "Authenticating to Azure..." -ForegroundColor Cyan
@@ -394,7 +375,6 @@ $subscriptionId = az account show --query id -o tsv
 
 function Wait-Seconds {
     param([int]$Seconds, [string]$Reason = "Waiting")
-    # Silent wait - just sleep without extra output
     Start-Sleep -Seconds $Seconds
 }
 
@@ -452,7 +432,6 @@ function Invoke-RetryOperation {
         [string]$OperationName = "operation"
     )
     
-    # Validate parameters
     if ($MaxRetries -eq 0 -and $TimeoutSeconds -eq 0) {
         throw "Must specify either MaxRetries or TimeoutSeconds"
     }
@@ -466,7 +445,6 @@ function Invoke-RetryOperation {
     while ($true) {
         $attempt++
         
-        # Check termination conditions
         if ($MaxRetries -gt 0 -and $attempt -gt $MaxRetries) {
             throw "Operation '$OperationName' failed after $MaxRetries attempts"
         }
@@ -474,17 +452,14 @@ function Invoke-RetryOperation {
             throw "Operation '$OperationName' timed out after $TimeoutSeconds seconds"
         }
         
-        # Execute the operation
         try {
             $result = & $ScriptBlock
             if ($result -eq $true) {
                 return $true
             }
         } catch {
-            # Let scriptblock handle its own errors; we just retry
         }
         
-        # Don't wait after the last attempt
         if ($MaxRetries -gt 0 -and $attempt -ge $MaxRetries) {
             break
         }
@@ -492,7 +467,6 @@ function Invoke-RetryOperation {
             break
         }
         
-        # Calculate delay
         if ($UseExponentialBackoff) {
             $delay = [Math]::Min($MaxDelaySeconds, $BaseDelaySeconds * [Math]::Pow(2, ($attempt - 1)))
         } else {
@@ -505,7 +479,6 @@ function Invoke-RetryOperation {
         
         $delay = [int][Math]::Round($delay)
         
-        # Format and display retry message
         $message = $RetryMessage
         $message = $message -replace '\{attempt\}', $attempt
         $message = $message -replace '\{max\}', $(if ($MaxRetries -gt 0) { $MaxRetries } else { "∞" })
@@ -733,7 +706,6 @@ function Assert-AzureResourceName {
         [string]$ResourceType
     )
     
-    # Define naming rules per resource type
     $rules = @{
         'ResourceGroup' = @{
             MinLength = 1
@@ -817,12 +789,10 @@ function Assert-AzureResourceName {
     $rule = $rules[$ResourceType]
     $sanitizedName = $Name
     
-    # Apply lowercase if required
     if ($rule.RequireLowercase) {
         $sanitizedName = $sanitizedName.ToLower()
     }
     
-    # Strip non-alphanumeric characters if required (for ACR)
     if ($rule.StripNonAlphanumeric) {
         $sanitizedName = $sanitizedName -replace '[^a-zA-Z0-9]', ''
         if ($rule.RequireLowercase) {
@@ -830,39 +800,32 @@ function Assert-AzureResourceName {
         }
     }
     
-    # Remove double hyphens if not allowed
     if ($rule.NoDoubleHyphen) {
         while ($sanitizedName -match '--') {
             $sanitizedName = $sanitizedName -replace '--', '-'
         }
     }
     
-    # Remove leading hyphen if not allowed
     if ($rule.NoLeadingHyphen) {
         $sanitizedName = $sanitizedName.TrimStart('-')
     }
     
-    # Remove trailing hyphen if not allowed
     if ($rule.NoTrailingHyphen) {
         $sanitizedName = $sanitizedName.TrimEnd('-')
     }
     
-    # Validate minimum length
     if ($sanitizedName.Length -lt $rule.MinLength) {
         throw "Resource name '$Name' for $ResourceType is too short after sanitization (min: $($rule.MinLength) chars). Result: '$sanitizedName'. $($rule.Description)"
     }
     
-    # Trim to maximum length if needed
     if ($sanitizedName.Length -gt $rule.MaxLength) {
         $sanitizedName = $sanitizedName.Substring(0, $rule.MaxLength)
         
-        # Re-apply trailing hyphen removal after truncation
         if ($rule.NoTrailingHyphen) {
             $sanitizedName = $sanitizedName.TrimEnd('-')
         }
     }
     
-    # Final validation against allowed character pattern
     if ($sanitizedName -notmatch $rule.AllowedChars) {
         throw "Resource name '$sanitizedName' for $ResourceType contains invalid characters. $($rule.Description)"
     }
@@ -876,7 +839,6 @@ OK $accountInfoResult "Failed to retrieve account information after login"
 $accountInfo = $accountInfoResult.TrimmedText | ConvertFrom-Json
 $currentSub = $accountInfo.name
 $currentSubId = $accountInfo.id
-# PS 5.1 compatible null-safe property access
 $currentAccountUser = if ($accountInfo.user) { $accountInfo.user.name } else { $null }
 if (-not $currentAccountUser -and $accountInfo.user) { $currentAccountUser = $accountInfo.user.userName }
 if (-not $currentAccountUser -and $accountInfo.user) { $currentAccountUser = $accountInfo.user.userPrincipalName }
@@ -939,22 +901,11 @@ if ($confirm -eq 'list' -or $confirm -eq 'l') {
 $estimatedFinishTime = (Get-Date).AddMinutes(8).ToString("HH:mm:ss")
 Write-Host "Starting deployment. Estimated time to complete: 8m (finish ~$estimatedFinishTime)" -ForegroundColor Cyan
 
-# Initialize resource group variable for cleanup scope
 $rg = $null
 
 try {
     [void](Test-AzureTokenExpiry -ExpiryBufferMinutes 5)
     
-    # Detect parameter set mode
-    # ============================================================================
-    # DEPLOYMENT
-    # ============================================================================
-    # Generate resource names: use custom names if provided, otherwise generate defaults with timestamp
-    
-    # Use a standard prefix for default resource names
-    $defaultPrefix = "dab-demo-"
-    
-    # Generate default names with timestamp if custom names not provided
     if ([string]::IsNullOrWhiteSpace($ResourceGroupName)) {
         $ResourceGroupName = "${defaultPrefix}$runTimestamp"
     }
@@ -972,7 +923,6 @@ try {
     }
     
     if ([string]::IsNullOrWhiteSpace($AcrName)) {
-        # ACR needs special handling - strip non-alphanumeric characters and enforce lowercase
         $acrPrefix = ($defaultPrefix -replace '[^a-zA-Z0-9]', '').ToLower()
         $AcrName = "${acrPrefix}$runTimestamp".ToLower()
     }
@@ -989,7 +939,6 @@ try {
         $SqlCommanderName = "sql-commander-$runTimestamp"
     }
     
-    # Validate and sanitize all resource names according to Azure naming rules
     $rg = Assert-AzureResourceName -Name $ResourceGroupName -ResourceType 'ResourceGroup'
     $sqlServer = Assert-AzureResourceName -Name $SqlServerName -ResourceType 'SqlServer'
     $sqlDb = Assert-AzureResourceName -Name $SqlDatabaseName -ResourceType 'Database'
@@ -1195,7 +1144,6 @@ try {
                     }
                     
                     if (-not $isAdAuthError) {
-                        # Non-retriable error
                         Write-StepStatus "" "Error" "sqlcmd exit code $sqlExit. See $script:CliLog"
                         throw "Database schema deployment failed with exit code $sqlExit"
                     }
@@ -1337,8 +1285,6 @@ try {
     
     $connectionString = "Server=tcp:${sqlServerFqdn},1433;Database=${sqlDb};Authentication=Active Directory Managed Identity;"
     
-    # Create container app with the correct ACR image from the start
-    # No placeholder image, no update needed, no revision churn
     $createAppStartTime = Get-Date
     $createAppArgs = @(
         'containerapp', 'create',
@@ -1369,7 +1315,6 @@ try {
     $principalIdArgs = @('containerapp', 'show', '--name', $container, '--resource-group', $rg, '--query', 'identity.principalId', '--output', 'tsv')
     $principalIdResult = Invoke-AzCli -Arguments $principalIdArgs
     OK $principalIdResult "Failed to retrieve MI principal ID"
-    # Remove WARNING lines and strip all whitespace from GUID
     $principalId = ($principalIdResult.TrimmedText -split "`n" | Where-Object { $_ -notmatch '^WARNING:' }) -join ''
     $principalId = $principalId -replace '\s+', ''
     if ([string]::IsNullOrWhiteSpace($principalId)) {
@@ -1384,7 +1329,6 @@ try {
     $acrIdArgs = @('acr', 'show', '--name', $acrName, '--resource-group', $rg, '--query', 'id', '--output', 'tsv')
     $acrIdResult = Invoke-AzCli -Arguments $acrIdArgs
     OK $acrIdResult "Failed to retrieve ACR resource ID"
-    # Remove WARNING lines but preserve resource ID format (don't collapse whitespace)
     $acrId = ($acrIdResult.TrimmedText -split "`n" | Where-Object { $_ -notmatch '^WARNING:' }) -join ''
     $acrId = $acrId.Trim()
     
@@ -1416,7 +1360,6 @@ try {
     $success = Invoke-RetryOperation `
         -ScriptBlock {
             try {
-                # Escape for both string literals and bracket identifiers in T-SQL
                 $escapedUserName = $sqlUserName.Replace("'", "''")
                 $escapedBracketName = $sqlUserName.Replace("]", "]]")
                 $sqlQuery = @"
@@ -1439,12 +1382,10 @@ END CATCH
                 $sqlResult.LastExit = $sqlExit
                 $sqlResult.LastOutput = $sqlcmdOutput
                 
-                # Check both exit code AND output for success message
                 if ($sqlExit -eq 0 -and $sqlcmdOutput -match 'PERMISSION_GRANT_SUCCESS') {
                     return $true
                 }
                 
-                # Check for non-retryable errors that should fail immediately
                 if ($sqlcmdOutput -match 'duplicate display name' -or 
                     $sqlcmdOutput -match 'Msg 33131') {
                     Write-StepStatus "" "Error" "Non-retryable error: Duplicate display name in Azure AD"
@@ -1459,10 +1400,9 @@ END CATCH
                 }
                 return $false
             } catch {
-                # Check if this is a non-retryable error
                 if ($_.Exception.Message -match 'duplicate display name' -or 
                     $_.Exception.Message -match 'cannot proceed') {
-                    throw  # Re-throw to stop retries
+                    throw
                 }
                 Write-StepStatus "" "Info" "SQL error: $($_.Exception.Message)"
                 return $false
@@ -1489,7 +1429,6 @@ END CATCH
     $verifyStartTime = Get-Date
     
     try {
-        # Escape the username for SQL query (same escaping as in the grant operation)
         $escapedUserName = $sqlUserName.Replace("'", "''")
         
         $verifyPermsQuery = @"
@@ -1549,7 +1488,6 @@ WHERE dp.name = '$escapedUserName';
             $statusResult = Invoke-AzCli -Arguments $statusArgs
             
             if ($statusResult.ExitCode -eq 0) {
-                # Remove WARNING lines from containerapp extension before parsing JSON
                 $cleanedJson = ($statusResult.TrimmedText -split "`n" | Where-Object { $_ -notmatch '^WARNING:' }) -join "`n"
                 $cleanedJson = $cleanedJson.Trim()
                 
@@ -1561,7 +1499,6 @@ WHERE dp.name = '$escapedUserName';
                         $replicaResult = Invoke-AzCli -Arguments $replicaArgs
                     
                         if ($replicaResult.ExitCode -eq 0) {
-                            # Remove WARNING lines and extract numeric value
                             $restartCountRaw = $replicaResult.TrimmedText
                             $restartCount = ($restartCountRaw -split "`n" | Where-Object { $_ -match '^\d+$' }) | Select-Object -First 1
                             
@@ -1596,7 +1533,6 @@ WHERE dp.name = '$escapedUserName';
     $containerShowArgs = @('containerapp', 'show', '--name', $container, '--resource-group', $rg, '--query', 'properties.configuration.ingress.fqdn', '--output', 'tsv')
     $containerShowResult = Invoke-AzCli -Arguments $containerShowArgs
     if ($containerShowResult.ExitCode -eq 0 -and -not [string]::IsNullOrWhiteSpace($containerShowResult.TrimmedText)) {
-        # Remove WARNING lines from Azure CLI containerapp extension before constructing URL
         $cleanFqdn = ($containerShowResult.TrimmedText -split "`n" | Where-Object { $_ -notmatch '^WARNING:' }) -join ''
         $cleanFqdn = $cleanFqdn.Trim()
         $containerUrl = "https://$cleanFqdn"
@@ -1604,7 +1540,6 @@ WHERE dp.name = '$escapedUserName';
         Write-StepStatus "Checking DAB API health endpoint" "Started" "120s"
         $healthCheckStartTime = Get-Date
         
-        # Give container time to stabilize after restart
         Write-Host "  Waiting 15s for container to stabilize..." -ForegroundColor Gray
         Start-Sleep -Seconds 15
         
@@ -1655,19 +1590,13 @@ WHERE dp.name = '$escapedUserName';
     }
 
 
-    # ============================================================================
-    # SQL COMMANDER DEPLOYMENT (OPTIONAL)
-    # ============================================================================
-    # Deploy SQL Commander if enabled
     $sqlCommanderUrl = "Not deployed"
     if (-not $NoSqlCommander) {
         Write-StepStatus "Deploying SQL Commander" "Started" "30s"
         $sqlCmdStartTime = Get-Date
         
-        # Build connection string for Azure SQL with Azure AD authentication
         $sqlConnectionString = "Server=$sqlServerFqdn;Database=$sqlDb;Authentication=Active Directory Default;Encrypt=True;TrustServerCertificate=False;"
         
-        # Deploy SQL Commander container app with system-assigned managed identity
         $sqlCmdArgs = @(
             'containerapp', 'create',
             '--name', $sqlCommander,
@@ -1691,18 +1620,15 @@ WHERE dp.name = '$escapedUserName';
             $sqlCmdElapsed = [math]::Round(((Get-Date) - $sqlCmdStartTime).TotalSeconds, 1)
             Write-StepStatus "" "Success" "$sqlCommander created ($($sqlCmdElapsed)`s)"
             
-            # Get SQL Commander managed identity principal ID
             Write-StepStatus "Retrieving SQL Commander managed identity" "Started" "5s"
             $sqlCmdPrincipalIdArgs = @('containerapp', 'show', '--name', $sqlCommander, '--resource-group', $rg, '--query', 'identity.principalId', '--output', 'tsv')
             $sqlCmdPrincipalIdResult = Invoke-AzCli -Arguments $sqlCmdPrincipalIdArgs
             
             if ($sqlCmdPrincipalIdResult.ExitCode -eq 0 -and -not [string]::IsNullOrWhiteSpace($sqlCmdPrincipalIdResult.TrimmedText)) {
-                # Remove WARNING lines and strip all whitespace from GUID
                 $sqlCmdPrincipalId = ($sqlCmdPrincipalIdResult.TrimmedText -split "`n" | Where-Object { $_ -notmatch '^WARNING:' }) -join ''
                 $sqlCmdPrincipalId = $sqlCmdPrincipalId -replace '\s+', ''
                 Write-StepStatus "" "Success" "Principal ID: $sqlCmdPrincipalId"
                 
-                # Get SQL Commander managed identity display name
                 Write-StepStatus "Retrieving SQL Commander MI display name" "Started" "5s"
                 try {
                     $sqlCmdSpDisplayName = Get-MI-DisplayName -PrincipalId $sqlCmdPrincipalId
@@ -1711,14 +1637,12 @@ WHERE dp.name = '$escapedUserName';
                     throw "Failed to retrieve SQL Commander managed identity display name: $($_.Exception.Message)"
                 }
                 
-                # Grant SQL Commander managed identity access to SQL Database
                 Write-StepStatus "Granting SQL Commander MI access to SQL Database" "Started" "10s"
                 $sqlCmdSqlStartTime = Get-Date
                 
                 $sqlCmdSqlSuccess = Invoke-RetryOperation `
                     -ScriptBlock {
                         try {
-                            # Escape for both string literals and bracket identifiers in T-SQL
                             $escapedUserName = $sqlCmdSpDisplayName.Replace("'", "''")
                             $escapedBracketName = $sqlCmdSpDisplayName.Replace("]", "]]")
                             $sqlQuery = @"
@@ -1743,7 +1667,6 @@ END CATCH
                                 return $true
                             }
                             
-                            # Check for non-retryable errors that should fail immediately
                             if ($sqlcmdOutput -match 'duplicate display name' -or 
                                 $sqlcmdOutput -match 'Msg 33131') {
                                 Write-StepStatus "" "Error" "Non-retryable error: Duplicate display name in Azure AD"
@@ -1755,7 +1678,6 @@ END CATCH
                             }
                             return $false
                         } catch {
-                            # Check if this is a non-retryable error
                             if ($_.Exception.Message -match 'duplicate display name' -or 
                                 $_.Exception.Message -match 'cannot proceed') {
                                 throw  # Re-throw to stop retries
@@ -1785,12 +1707,10 @@ END CATCH
                 Write-Host "  SQL Commander may not be able to connect to the database" -ForegroundColor Yellow
             }
             
-            # Get SQL Commander FQDN
             $sqlCmdFqdnArgs = @('containerapp', 'show', '--name', $sqlCommander, '--resource-group', $rg, '--query', 'properties.configuration.ingress.fqdn', '--output', 'tsv')
             $sqlCmdFqdnResult = Invoke-AzCli -Arguments $sqlCmdFqdnArgs
             
             if ($sqlCmdFqdnResult.ExitCode -eq 0 -and -not [string]::IsNullOrWhiteSpace($sqlCmdFqdnResult.TrimmedText)) {
-                # Remove WARNING lines from Azure CLI containerapp extension before constructing URL
                 $sqlCommanderFqdn = ($sqlCmdFqdnResult.TrimmedText -split "`n" | Where-Object { $_ -notmatch '^WARNING:' }) -join ''
                 $sqlCommanderFqdn = $sqlCommanderFqdn.Trim()
                 $sqlCommanderUrl = "https://$sqlCommanderFqdn"
@@ -1842,7 +1762,6 @@ END CATCH
         }
     }
     
-    # Append deployment summary to log file
     $summaryJson = $deploymentSummary | ConvertTo-Json -Depth 3
     Add-Content -Path $script:CliLog -Value "`n`n[DEPLOYMENT SUMMARY]"
     Add-Content -Path $script:CliLog -Value $summaryJson
