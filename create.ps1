@@ -906,6 +906,8 @@ $rg = $null
 try {
     [void](Test-AzureTokenExpiry -ExpiryBufferMinutes 5)
     
+    $defaultPrefix = "dab-demo-"
+    
     if ([string]::IsNullOrWhiteSpace($ResourceGroupName)) {
         $ResourceGroupName = "${defaultPrefix}$runTimestamp"
     }
