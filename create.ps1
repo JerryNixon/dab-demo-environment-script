@@ -1257,14 +1257,11 @@ try {
     $acrElapsed = [math]::Round(((Get-Date) - $acrStartTime).TotalSeconds, 1)
     Write-StepStatus "" "Success" "$acrName ($($acrElapsed)`s)"
     
-    $acrLoginServerArgs = @('acr', 'show', '--resource-group', $rg, '--name', $acrName, '--query', 'loginServer', '--output', 'tsv')
-    $acrLoginServerResult = Invoke-AzCli -Arguments $acrLoginServerArgs
-    OK $acrLoginServerResult "Failed to retrieve ACR login server"
-    $acrLoginServer = $acrLoginServerResult.TrimmedText
+    # ACR login server is always {name}.azurecr.io
+    $acrLoginServer = "$acrName.azurecr.io"
+    $imageTag = "$acrLoginServer/dab-baked:$runTimestamp"
     
     Write-StepStatus "Building custom DAB image with baked config" "Started" "40s"
-    
-    $imageTag = "$acrLoginServer/dab-baked:$runTimestamp"
     
     $buildStartTime = Get-Date
     $buildArgs = @(
@@ -1276,12 +1273,31 @@ try {
         '--build-arg', "DAB_VERSION=$DockerDabVersion",
         '.'
     )
-    $buildResult = Invoke-AzCli -Arguments $buildArgs
-    OK $buildResult "Failed to build custom DAB image"
+    
+    $buildSuccess = Invoke-RetryOperation `
+        -ScriptBlock {
+            $buildResult = Invoke-AzCli -Arguments $buildArgs
+            if ($buildResult.ExitCode -eq 0) {
+                return $true
+            }
+            if ($buildResult.Text -match 'no such host|dial tcp.*lookup|network.*unavailable') {
+                return $false
+            }
+            throw "Build failed with non-retryable error: $($buildResult.Text)"
+        } `
+        -MaxRetries 3 `
+        -BaseDelaySeconds 30 `
+        -UseExponentialBackoff `
+        -MaxDelaySeconds 120 `
+        -RetryMessage "ACR build (DNS propagation); attempt {attempt}/{max}, wait {delay}s" `
+        -OperationName "ACR-Build"
+    
+    if (-not $buildSuccess) {
+        throw "Failed to build custom DAB image after retries"
+    }
+    
     $buildElapsed = [math]::Round(((Get-Date) - $buildStartTime).TotalSeconds, 1)
     Write-StepStatus "" "Success" "$imageTag ($($buildElapsed)`s)"
-    
-    $ContainerImage = $imageTag
 
     Write-StepStatus "Creating Container App with ACR image" "Started" "60s"
     
@@ -1296,7 +1312,7 @@ try {
         '--system-assigned',
         '--ingress', 'external',
         '--target-port', '5000',
-        '--image', $ContainerImage,
+        '--image', $imageTag,
         '--registry-server', $acrLoginServer,
         '--registry-identity', 'system',
         '--cpu', $Config.ContainerCpu,
@@ -1310,7 +1326,7 @@ try {
     $createAppResult = Invoke-AzCli -Arguments $createAppArgs
     OK $createAppResult "Failed to create Container App"
     $createAppElapsed = [math]::Round(((Get-Date) - $createAppStartTime).TotalSeconds, 1)
-    Write-StepStatus "" "Success" "$container created with $ContainerImage ($($createAppElapsed)`s)"
+    Write-StepStatus "" "Success" "$container created with $imageTag ($($createAppElapsed)`s)"
     
     Write-StepStatus "Assigning AcrPull role to managed identity" "Started" "15s"
     
